@@ -77,6 +77,7 @@ Armbian-unofficial_<version>_Mrk3399_bookworm_current_<kernel>_minimal.img.txt
 | ---------------------------- | ----------------- | ---------------------------------------------------------------------------------------- |
 | `DEBUG=yes`                  | `no`              | Bring-up boot environment: earlycon and `verbosity=7` in `/boot/armbianEnv.txt`. Only affects `make build`. |
 | `PROXY_HOST=<ip>`            | empty             | Rewrite `127.0.0.1` in `http_proxy` / `https_proxy` so the build container can reach a host proxy |
+| `REVISION=<version>`         | armbian/build's `VERSION` | Version in the image and package names; must start with a digit                   |
 | `ARMBIAN_BUILD_COMMIT=<sha>` | pinned in Makefile | armbian/build commit to check out (see [Upgrading armbian/build](docs/design.md#upgrading-armbianbuild)) |
 
 Image contents (Debian release, minimal vs. full, compression) are set in
@@ -97,6 +98,15 @@ Without a proxy in mainland China, uncomment `REGIONAL_MIRROR=china` in `userpat
 It sends kernel, firmware and apt to TUNA, U-Boot to Gitee, other GitHub downloads to ghfast.top and ghcr.io to NJU.
 When this port was built, the Gitee U-Boot mirror didn't have the `v2026.07` tag yet and the build failed there,
 so a proxy is the more reliable route. Don't combine the two.
+
+### Releases
+
+Prebuilt images are on the [Releases](https://github.com/yplam/mrk3399-armbian/releases) page. They're built by
+the [`Release image`](.github/workflows/release.yml) workflow, which is started by hand from the Actions tab. It runs
+`make build` on a GitHub-hosted runner and publishes the `.img.xz`, `.sha` and `.img.txt` as a release tagged with
+the UTC build date, for example `2026.09.14` (a second build that day becomes `2026.09.14.2`). The tag is passed as
+`REVISION`, so it's also the version in the image name. Armbian has no cached kernel or U-Boot for this board, so
+each run compiles both and takes about 2 hours. If the build fails, its logs are attached to the run as `build-logs`.
 
 ## Flash
 
@@ -122,6 +132,7 @@ for a root password and creates a user, and the root filesystem grows to fill th
 
 ```
 mrk3399-armbian/
+├── .github/workflows/release.yml # manual workflow: build the image and publish a release
 ├── Makefile                      # setup / build / uboot / kernel / clean
 ├── docs/
 │   ├── design.md                 # how the port works, boot chain, device tree, upgrading armbian/build

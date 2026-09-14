@@ -11,6 +11,11 @@ BRANCH               := current
 # DEBUG=yes: bring-up boot environment (earlycon, verbosity=7), see docs/troubleshooting.md
 DEBUG ?= no
 
+# REVISION=<version>: version in image and package names, must start with a digit.
+# Empty: Armbian takes it from build/VERSION at the pinned commit.
+REVISION ?=
+ARMBIAN_ARGS := $(if $(REVISION),REVISION=$(REVISION))
+
 # Armbian relaunches itself in Docker and passes http_proxy/https_proxy through.
 # A proxy bound to 127.0.0.1 on the host is unreachable from the container, so
 # PROXY_HOST=<ip> rewrites 127.0.0.1 to an address the container can reach: the
@@ -28,14 +33,14 @@ setup:
 
 # Full image build; output lands in $(ARMBIAN_DIR)/output/images
 build: setup
-	cd $(ARMBIAN_DIR) && $(ARMBIAN_ENV) ./compile.sh mrk3399 MRK3399_DEBUG=$(DEBUG)
+	cd $(ARMBIAN_DIR) && $(ARMBIAN_ENV) ./compile.sh mrk3399 MRK3399_DEBUG=$(DEBUG) $(ARMBIAN_ARGS)
 
 # Rebuild only the U-Boot or kernel packages (faster iteration); output in $(ARMBIAN_DIR)/output/debs
 uboot: setup
-	cd $(ARMBIAN_DIR) && $(ARMBIAN_ENV) ./compile.sh uboot BOARD=mrk3399 BRANCH=$(BRANCH)
+	cd $(ARMBIAN_DIR) && $(ARMBIAN_ENV) ./compile.sh uboot BOARD=mrk3399 BRANCH=$(BRANCH) $(ARMBIAN_ARGS)
 
 kernel: setup
-	cd $(ARMBIAN_DIR) && $(ARMBIAN_ENV) ./compile.sh kernel BOARD=mrk3399 BRANCH=$(BRANCH)
+	cd $(ARMBIAN_DIR) && $(ARMBIAN_ENV) ./compile.sh kernel BOARD=mrk3399 BRANCH=$(BRANCH) $(ARMBIAN_ARGS)
 
 # Remove built images and packages; download and compile caches in $(ARMBIAN_DIR)/cache are kept
 clean:

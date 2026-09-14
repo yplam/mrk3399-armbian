@@ -1,0 +1,99 @@
+# Build the image with `make build` and publish it as a GitHub release.
+# Run it from the Actions tab. The release tag is the UTC build date (2026.09.14);
+# a second build on the same day gets 2026.09.14.2, and so on. The tag is also
+# the image version: Armbian-unofficial_2026.09.14_Mrk3399_bookworm_current_<kernel>_minimal.img.xz
+#
+# Armbian's remote cache has no artifacts for this board, so U-Boot and the
+# kernel are compiled on every run (about 2 hours on a hosted runner).
+name: Release image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Pick release tag
+        id: tag
+        run: |
+          base=$(date -u +%Y.%m.%d)
+          tag=$base
+          n=1
+          while git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; do
+            n=$((n + 1))
+            tag=$base.$n
+          done
+          echo "Release tag: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # The runner has ~14 GB free; the kernel git bundle, worktree and build
+      # objects alone need more than that.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Build image
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: make build REVISION="$TAG"
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-logs
+          path: build/output/logs/
+          if-no-files-found: ignore
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          cd build/output/images
+          images=(Armbian-unofficial_*_Mrk3399_*.img.xz)
+          if [[ ${#images[@]} -ne 1 || ! -f ${images[0]} ]]; then
+            echo "::error::expected exactly one image, found: ${images[*]}"
+            ls -la
+            exit 1
+          fi
+          image=${images[0]}
+          # Armbian-unofficial_<version>_Mrk3399_<release>_<branch>_<kernel>_minimal.img.xz
+          IFS=_ read -r _ _ _ release branch kernel _ <<< "$image"
+          sha256=$(sha256sum "$image" | cut -d ' ' -f 1)
+          armbian_commit=$(git -C ../.. rev-parse HEAD)
+          repo_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY
+
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Unofficial Armbian image for the MRK3399, built from [\`${GITHUB_SHA:0:7}\`]($repo_url/commit/$GITHUB_SHA).
+
+          | | |
+          | --- | --- |
+          | Image | \`$image\` |
+          | Kernel | $kernel (\`$branch\`) |
+          | Userspace | Debian $release, minimal |
+          | armbian/build | [\`${armbian_commit:0:10}\`](https://github.com/armbian/build/commit/$armbian_commit) |
+          | SHA-256 | \`$sha256\` |
+
+          Flash with \`rkdeveloptool\`, see [docs/flashing.md]($repo_url/blob/$GITHUB_SHA/docs/flashing.md).
+          EOF
+
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "MRK3399 Armbian $TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "$image" "$image.sha" "${image%.xz}.txt"
