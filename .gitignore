@@ -1,0 +1,5 @@
+# armbian/build clone, created by `make setup`
+/build/
+# templates armbian/build copies into userpatches on every run
+/userpatches/config-example.conf
+/userpatches/customize-image.sh

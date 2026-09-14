@@ -1,0 +1,4 @@
+verbosity=7
+bootlogo=false
+console=serial
+extraargs=earlycon=uart8250,mmio32,0xff1a0000
