@@ -1,0 +1,29 @@
+# Added by the mrk3399-armbian port. See docs/usb-gadget.md.
+#
+# The USB gadget link to the PC. Armbian renders the wired interfaces from
+# Netplan (/etc/netplan/10-dhcp-all-interfaces.yaml) into /run/systemd/network,
+# but its matches are "e*", "lan*" and "wan*", so usb0 is left to this file.
+# The 05- prefix keeps it ahead of anything Netplan generates.
+#
+# The board takes 10.55.0.1 and hands the PC 10.55.0.2 over DHCP. No router or
+# DNS option is emitted: this link is for reaching the board, not for routing
+# the PC's traffic through it.
+
+[Match]
+Name=usb0
+
+[Link]
+# The link has no carrier until a PC is plugged in; don't hold up boot for it.
+RequiredForOnline=no
+
+[Network]
+Address=10.55.0.1/29
+DHCPServer=yes
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[DHCPServer]
+PoolOffset=2
+PoolSize=1
+EmitRouter=no
+EmitDNS=no

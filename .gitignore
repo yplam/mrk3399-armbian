@@ -1,5 +1,6 @@
 # armbian/build clone, created by `make setup`
 /build/
-# templates armbian/build copies into userpatches on every run
+# template armbian/build copies into userpatches when it is missing.
+# customize-image.sh is NOT ignored: this port ships its own (it installs the
+# USB gadget), and Armbian only copies its template in when the file is absent.
 /userpatches/config-example.conf
-/userpatches/customize-image.sh

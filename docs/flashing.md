@@ -26,7 +26,8 @@ Check with `rkdeveloptool ld`. It prints `Maskrom` or `Loader`.
 | Board state                          | How                                                                                     |
 | ------------------------------------ | --------------------------------------------------------------------------------------- |
 | Empty or erased eMMC                 | Connect the flashing USB port and power on. The BootROM finds no bootloader and enters maskrom. |
-| Any image with U-Boot v2026.07 (this one) or another U-Boot with `CONFIG_CMD_ROCKUSB` | Stop at the U-Boot prompt and run `rockusb 0 mmc 0`. The board appears in **loader** mode; skip `db`. |
+| Any image built from this repo | Stop at the U-Boot prompt and run `rockusb 0 mmc 0`. The board appears in **loader** mode; skip `db`. |
+| Another U-Boot with `CONFIG_CMD_ROCKUSB` | The same, *if* its device tree doesn't set `dr_mode = "host"` on `usbdrd_dwc3_0`. Stock `rock-pi-4-rk3399_defconfig` does, and then no USB gadget is registered and `rockusb` fails — see [USB and the OTG port](design.md#usb-and-the-otg-port). |
 | U-Boot works but has no `rockusb`    | At the U-Boot prompt run `mmc erase 0 10000` then `reset`. This erases the bootloader area, so the next boot enters maskrom. |
 
 The last method wipes the bootloader: the board won't boot again until it's reflashed.
@@ -45,6 +46,9 @@ rkdeveloptool rd                                # reset and boot
 `wl 0` writes from sector 0, so the partition table, bootloader and root filesystem are all replaced. On first
 boot Armbian grows the root partition to fill the eMMC. Until then the kernel reports
 `GPT: Alternate GPT header not at the end of the disk`, which is expected.
+
+The flashing port is the RK3399's OTG port, and this image keeps it a USB device once Linux is up: it comes
+back as a network link and a login console rather than going quiet. See [usb-gadget.md](usb-gadget.md).
 
 To check the image against its checksum first: `sha256sum -c Armbian-unofficial_*.img.xz.sha` in
 `build/output/images/`.

@@ -1,0 +1,19 @@
+[Unit]
+Description=MRK3399 USB gadget on the OTG port (CDC-NCM/RNDIS + CDC-ACM)
+Documentation=https://github.com/yplam/mrk3399-armbian/blob/master/docs/usb-gadget.md
+Wants=sys-kernel-config.mount
+After=sys-kernel-config.mount systemd-modules-load.service
+# Deliberately not ordered before network-pre.target: find_udc can wait up to
+# 10s for dwc3 to probe, and systemd-networkd picks usb0 up as a hotplug
+# interface anyway, so there is no reason to hold networking back for it.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/mrk3399-usb-gadget start
+ExecStop=/usr/local/sbin/mrk3399-usb-gadget stop
+# find_udc waits up to 10s for dwc3 to probe, and the getty wait adds 5s.
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

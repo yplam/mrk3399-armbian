@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Copyright (C) 2019 Jagan Teki <jagan@amarulasolutions.com>
+ *
+ * MRK3399: replaces U-Boot's own arch/arm/dts/rk3399-rock-pi-4a-u-boot.dtsi
+ * (copied in by patch/u-boot/v2026.07/0000.patching_config.yaml, which maps
+ * dt_uboot/ onto arch/arm/dts/). The board builds U-Boot from
+ * rock-pi-4-rk3399_defconfig, so this is the -u-boot.dtsi that gets applied
+ * to CONFIG_DEFAULT_DEVICE_TREE="rockchip/rk3399-rock-pi-4a".
+ *
+ * Everything above the usbdrd_dwc3_0 override is verbatim from U-Boot v2026.07.
+ * See docs/usb-gadget.md.
+ */
+
+#include "rk3399-rock-pi-4-u-boot.dtsi"
+
+&spi1 {
+	flash@0 {
+		bootph-pre-ram;
+		bootph-some-ram;
+	};
+};
+
+/*
+ * The upstream Rock Pi 4 device tree sets dr_mode = "host" on controller 0's
+ * OTG port. dwc3-generic only binds the peripheral driver for "peripheral" or
+ * "otg" (dwc3_glue_bind() in drivers/usb/dwc3/dwc3-generic.c), so with "host"
+ * no UDC is registered and both `rockusb 0 mmc 0` and `ums 0 mmc 0` fail with
+ * no usable USB gadget -- on the one port that could serve them, since it is
+ * also the maskrom port.
+ *
+ * The MRK3399 has no device on that connector to host, and Linux runs it as a
+ * gadget too (dr_mode = "peripheral" in rk3399-mrk3399.dts), so make U-Boot
+ * agree. The two type-A ports are unaffected: they are on usb_host0/usb_host1
+ * and on controller 1.
+ */
+&usbdrd_dwc3_0 {
+	dr_mode = "peripheral";
+};

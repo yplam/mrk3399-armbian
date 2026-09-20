@@ -1,0 +1,42 @@
+# Configuration for mrk3399-usb-gadget.service.
+# Apply changes with: systemctl restart mrk3399-usb-gadget
+
+# Set to "no" to keep the OTG port idle. The port stays a USB device as far as
+# the device tree is concerned; nothing is bound to it.
+USB_GADGET_ENABLE=yes
+
+# Functions. NCM and RNDIS both present the same network link (usb0) and live
+# in separate configurations, so the host picks one: NCM on Linux, macOS and
+# Windows 11, RNDIS on Windows 10 and older.
+USB_GADGET_NCM=yes
+USB_GADGET_RNDIS=yes
+USB_GADGET_ACM=yes
+
+# Run a login console on the gadget serial port (/dev/ttyGS0), so the same
+# cable that carries the network link also carries a getty.
+USB_GADGET_ACM_CONSOLE=yes
+
+# Linux Foundation's multifunction composite gadget IDs. Fine for a device
+# that is never sold; change them if you need a host-side driver to match
+# something specific.
+USB_GADGET_VID=0x1d6b
+USB_GADGET_PID=0x0104
+
+# Reported USB version. Leave at 0x0200 (high speed) unless the OTG connector
+# actually carries the SuperSpeed pairs, in which case 0x0320 lets the gadget
+# advertise USB 3.2 -- tcphy0 is enabled in the device tree, so the SoC side is
+# ready either way.
+USB_GADGET_BCD_USB=0x0200
+
+USB_GADGET_MANUFACTURER="Armbian"
+USB_GADGET_PRODUCT="MRK3399"
+
+# Left empty, these are derived from the board's serial number, so they are
+# stable across reboots and differ between boards. Set them to fixed values if
+# you need to pin what the host sees.
+USB_GADGET_SERIAL=""
+USB_GADGET_MAC_DEV=""
+USB_GADGET_MAC_HOST=""
+
+# Left empty, the first controller in /sys/class/udc is used (fe800000.usb).
+USB_GADGET_UDC=""

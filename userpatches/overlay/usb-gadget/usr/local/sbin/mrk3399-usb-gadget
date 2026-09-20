@@ -1,0 +1,240 @@
+#!/bin/bash
+#
+# MRK3399 USB gadget.
+#
+# Builds a composite USB device on the RK3399's OTG port (controller 0 -- the
+# same connector the BootROM uses for maskrom mode, and the only port on this
+# SoC that can be a device) using configfs:
+#
+#   configuration 1  CDC-NCM + CDC-ACM   Linux, macOS, Windows 11
+#   configuration 2  RNDIS   + CDC-ACM   Windows 7-10, selected via MS OS descriptors
+#
+# NCM/RNDIS give a point-to-point network link (usb0, addressed by
+# /etc/systemd/network/05-mrk3399-usb-gadget.network, which also runs a
+# one-address DHCP server for the PC). ACM gives a login console on
+# /dev/ttyGS0. See docs/usb-gadget.md.
+#
+# This needs dr_mode = "peripheral" on &usbdrd_dwc3_0 in the device tree;
+# without it no UDC is registered and the gadget cannot be bound.
+
+set -euo pipefail
+set -E   # so the ERR trap in start() fires for failures inside it
+
+GADGET_NAME=mrk3399
+CONFIGFS=/sys/kernel/config
+GADGET="${CONFIGFS}/usb_gadget/${GADGET_NAME}"
+LANG_EN=0x409
+CONFIG_FILE=/etc/default/mrk3399-usb-gadget
+
+# Defaults; /etc/default/mrk3399-usb-gadget overrides them.
+USB_GADGET_ENABLE=yes
+USB_GADGET_NCM=yes
+USB_GADGET_RNDIS=yes
+USB_GADGET_ACM=yes
+USB_GADGET_ACM_CONSOLE=yes
+USB_GADGET_VID=0x1d6b
+USB_GADGET_PID=0x0104
+USB_GADGET_BCD_USB=0x0200
+USB_GADGET_MANUFACTURER="Armbian"
+USB_GADGET_PRODUCT="MRK3399"
+USB_GADGET_SERIAL=""
+USB_GADGET_MAC_DEV=""
+USB_GADGET_MAC_HOST=""
+USB_GADGET_UDC=""
+
+# shellcheck source=/dev/null
+[ -r "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
+
+log() { echo "mrk3399-usb-gadget: $*"; }
+die() { echo "mrk3399-usb-gadget: $*" >&2; exit 1; }
+
+set_attr() { printf '%s' "$2" > "$1"; }
+
+# Something stable and board-unique to seed the serial number and MACs from, so
+# the PC sees the same device across reboots and two boards on one PC differ.
+board_seed() {
+	local seed=""
+	[ -r /proc/device-tree/serial-number ] && seed=$(tr -d '\0' < /proc/device-tree/serial-number)
+	[ -n "${seed}" ] || seed=$(awk '/^Serial/ { print $3; exit }' /proc/cpuinfo 2> /dev/null || true)
+	[ -n "${seed}" ] || seed=$(cat /etc/machine-id 2> /dev/null || true)
+	[ -n "${seed}" ] || seed="${GADGET_NAME}"
+	printf '%s' "${seed}"
+}
+
+# A locally administered, unicast MAC derived from that seed.
+derive_mac() {
+	local hash
+	hash=$(printf '%s:%s' "$(board_seed)" "$1" | sha256sum | cut -c1-12)
+	printf '%02x:%s:%s:%s:%s:%s' \
+		"$(( (0x${hash:0:2} & 0xfe) | 0x02 ))" \
+		"${hash:2:2}" "${hash:4:2}" "${hash:6:2}" "${hash:8:2}" "${hash:10:2}"
+}
+
+# The UDC only appears once dwc3 has probed, which can be after this unit runs.
+find_udc() {
+	local i udc
+	for i in $(seq 1 100); do
+		udc=$(ls -1 /sys/class/udc 2> /dev/null | head -n1 || true)
+		[ -n "${udc}" ] && { printf '%s' "${udc}"; return 0; }
+		sleep 0.1
+	done
+	return 1
+}
+
+start() {
+	if [ "${USB_GADGET_ENABLE}" != "yes" ]; then
+		log "disabled in ${CONFIG_FILE}, doing nothing"
+		return 0
+	fi
+	if [ "${USB_GADGET_NCM}" != "yes" ] && [ "${USB_GADGET_RNDIS}" != "yes" ] && [ "${USB_GADGET_ACM}" != "yes" ]; then
+		die "every function is disabled in ${CONFIG_FILE}; nothing to build"
+	fi
+
+	modprobe -q libcomposite || true
+	mountpoint -q "${CONFIGFS}" || mount -t configfs none "${CONFIGFS}"
+
+	if [ -d "${GADGET}" ]; then
+		log "gadget already exists, leaving it alone"
+		return 0
+	fi
+
+	local udc="${USB_GADGET_UDC}"
+	if [ -z "${udc}" ]; then
+		udc=$(find_udc) || die "no UDC under /sys/class/udc after 10s -- check that the device tree sets dr_mode = \"peripheral\" on &usbdrd_dwc3_0"
+	fi
+
+	local serial="${USB_GADGET_SERIAL}"
+	[ -n "${serial}" ] || serial=$(board_seed)
+	local mac_dev="${USB_GADGET_MAC_DEV}"
+	[ -n "${mac_dev}" ] || mac_dev=$(derive_mac dev)
+	local mac_host="${USB_GADGET_MAC_HOST}"
+	[ -n "${mac_host}" ] || mac_host=$(derive_mac host)
+
+	mkdir -p "${GADGET}"
+	# Don't leave a half-built gadget behind: the next start would find the
+	# directory, decide it was already set up and never bind anything.
+	trap 'log "start failed, tearing down"; stop || true' ERR
+	cd "${GADGET}"
+
+	set_attr idVendor "${USB_GADGET_VID}"
+	set_attr idProduct "${USB_GADGET_PID}"
+	set_attr bcdDevice 0x0100
+	set_attr bcdUSB "${USB_GADGET_BCD_USB}"
+
+	# Miscellaneous device / interface association descriptor. Windows needs
+	# this to bind the separate RNDIS and ACM interfaces of one composite.
+	set_attr bDeviceClass 0xEF
+	set_attr bDeviceSubClass 0x02
+	set_attr bDeviceProtocol 0x01
+
+	mkdir -p "strings/${LANG_EN}"
+	set_attr "strings/${LANG_EN}/manufacturer" "${USB_GADGET_MANUFACTURER}"
+	set_attr "strings/${LANG_EN}/product" "${USB_GADGET_PRODUCT}"
+	set_attr "strings/${LANG_EN}/serialnumber" "${serial}"
+
+	if [ "${USB_GADGET_NCM}" = "yes" ]; then
+		mkdir -p functions/ncm.usb0
+		set_attr functions/ncm.usb0/dev_addr "${mac_dev}"
+		set_attr functions/ncm.usb0/host_addr "${mac_host}"
+	fi
+	if [ "${USB_GADGET_RNDIS}" = "yes" ]; then
+		mkdir -p functions/rndis.usb0
+		set_attr functions/rndis.usb0/dev_addr "${mac_dev}"
+		set_attr functions/rndis.usb0/host_addr "${mac_host}"
+		# Makes Windows load its own RNDIS driver instead of asking for one.
+		set_attr functions/rndis.usb0/os_desc/interface.rndis/compatible_id "RNDIS"
+		set_attr functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id "5162001"
+	fi
+	if [ "${USB_GADGET_ACM}" = "yes" ]; then
+		mkdir -p functions/acm.GS0
+	fi
+
+	# Configuration 1: the standards-based one. Hosts that don't know better
+	# pick the first configuration, which is what we want everywhere except
+	# on Windows 10 and older.
+	mkdir -p "configs/c.1/strings/${LANG_EN}"
+	set_attr "configs/c.1/strings/${LANG_EN}/configuration" "CDC"
+	set_attr configs/c.1/bmAttributes 0xC0   # self-powered: the board has its own supply
+	set_attr configs/c.1/MaxPower 250
+	[ "${USB_GADGET_NCM}" = "yes" ] && ln -s ../../functions/ncm.usb0 configs/c.1/ncm.usb0 || true
+	[ "${USB_GADGET_ACM}" = "yes" ] && ln -s ../../functions/acm.GS0 configs/c.1/acm.GS0 || true
+
+	# Configuration 2: RNDIS, which only Windows wants. The MS OS descriptors
+	# below point Windows at it; every other host stays on c.1.
+	if [ "${USB_GADGET_RNDIS}" = "yes" ]; then
+		mkdir -p "configs/c.2/strings/${LANG_EN}"
+		set_attr "configs/c.2/strings/${LANG_EN}/configuration" "RNDIS"
+		set_attr configs/c.2/bmAttributes 0xC0
+		set_attr configs/c.2/MaxPower 250
+		ln -s ../../functions/rndis.usb0 configs/c.2/rndis.usb0
+		[ "${USB_GADGET_ACM}" = "yes" ] && ln -s ../../functions/acm.GS0 configs/c.2/acm.GS0 || true
+
+		set_attr os_desc/use 1
+		set_attr os_desc/b_vendor_code 0xcd
+		set_attr os_desc/qw_sign "MSFT100"
+		ln -s configs/c.2 os_desc/c.2
+	fi
+
+	set_attr UDC "${udc}"
+	trap - ERR
+	log "bound to ${udc} (serial ${serial}, dev MAC ${mac_dev})"
+
+	if [ "${USB_GADGET_ACM}" = "yes" ] && [ "${USB_GADGET_ACM_CONSOLE}" = "yes" ]; then
+		local i
+		for i in $(seq 1 50); do
+			[ -c /dev/ttyGS0 ] && break
+			sleep 0.1
+		done
+		if [ -c /dev/ttyGS0 ]; then
+			systemctl --no-block start serial-getty@ttyGS0.service || log "could not start getty on ttyGS0"
+		else
+			log "/dev/ttyGS0 never appeared, no console started"
+		fi
+	fi
+}
+
+stop() {
+	[ -d "${GADGET}" ] || return 0
+
+	systemctl --no-block stop serial-getty@ttyGS0.service 2> /dev/null || true
+
+	cd "${GADGET}"
+
+	# Unbind first: the directories below can't be removed while the UDC holds
+	# them. A newline, not an empty write -- configfs ignores a zero-length one.
+	if [ -n "$(cat UDC)" ]; then
+		echo "" > UDC
+	fi
+
+	rm -f os_desc/c.2
+
+	# Tear down in dependency order: links out of the configs, then the config
+	# groups, then the functions, then the gadget's own strings. Each step only
+	# warns -- the final rmdir below is what decides whether it worked, and it
+	# names whatever is still holding the gadget.
+	local cfg str fn
+	for cfg in configs/*; do
+		[ -d "${cfg}" ] || continue
+		find "${cfg}" -maxdepth 1 -type l -delete
+		for str in "${cfg}"/strings/*; do
+			[ -d "${str}" ] && { rmdir "${str}" || log "could not remove ${str}"; }
+		done
+		rmdir "${cfg}" || log "could not remove ${cfg}"
+	done
+
+	for fn in functions/*; do
+		[ -d "${fn}" ] && { rmdir "${fn}" || log "could not remove ${fn}"; }
+	done
+	[ -d "strings/${LANG_EN}" ] && { rmdir "strings/${LANG_EN}" || log "could not remove strings/${LANG_EN}"; }
+
+	cd /
+	rmdir "${GADGET}"
+	log "removed"
+}
+
+case "${1:-}" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; start ;;
+	*) die "usage: $0 {start|stop|restart}" ;;
+esac

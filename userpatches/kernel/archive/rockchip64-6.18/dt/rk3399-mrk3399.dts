@@ -605,8 +605,25 @@
 	status = "okay";
 };
 
+/*
+ * Controller 0's OTG port is the connector the BootROM uses for maskrom mode,
+ * so it is the only port on this SoC that can be a USB device. "peripheral"
+ * makes Linux run it as a gadget: see docs/usb-gadget.md.
+ *
+ * The role must be set here rather than on the PHY: phy-rockchip-inno-usb2
+ * reads dr_mode from the controller that references the port
+ * (of_usb_get_dr_mode_by_phy) and skips the OTG state machine, the
+ * otg-bvalid / otg-id interrupts and the extcon device entirely when it is
+ * "host". dwc3 likewise only ever initialises xHCI on "host", even though
+ * the kernel is built CONFIG_USB_DWC3_DUAL_ROLE=y.
+ *
+ * "otg" is not used: the board has no Type-C CC controller and no ID pin
+ * routed, so there is nothing to switch roles from, and dwc3_get_extcon()
+ * would need an explicit extcon = <&u2phy0> phandle to find the PHY's
+ * extcon device.
+ */
 &usbdrd_dwc3_0 {
-	dr_mode = "host";
+	dr_mode = "peripheral";
 	status = "okay";
 };
 

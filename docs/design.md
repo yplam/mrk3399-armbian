@@ -15,12 +15,15 @@ Armbian looks in `userpatches/` for anything that isn't in its own tree, so noth
 | `userpatches/kernel/archive/rockchip64-6.18/dt/rk3399-mrk3399.dts`  | extra kernel device tree; the `rockchip64-6.18` patching config copies `dt/` into `arch/arm64/boot/dts/rockchip/` and adds it to the Makefile, no patch needed |
 | `userpatches/bootenv/mrk3399.txt`, `mrk3399-debug.txt`              | installed as `/boot/armbianEnv.txt` (selected by `BOOTENV_FILE`)                                     |
 | `userpatches/extensions/qemu-binfmt-register.sh`                    | build extension, enabled in `config-mrk3399.conf`                                                    |
+| `userpatches/u-boot/v2026.07/dt_uboot/rk3399-rock-pi-4a-u-boot.dtsi` | replaces U-Boot's own file of that name; `dt_uboot/` is copied onto `arch/arm/dts/` and same-named userpatches files win |
+| `userpatches/customize-image.sh`, `userpatches/overlay/`            | installs the USB gadget into the image; the overlay is bind-mounted at `/tmp/overlay` in the chroot   |
 
-On every run Armbian also creates `config-example.conf`, `customize-image.sh`, `overlay/` and a set of empty patch
-directories in `userpatches/`. Git ignores the two template files and doesn't track empty directories. To add
-packages or files to the image, use Armbian's
-[`customize-image.sh`](https://docs.armbian.com/Developer-Guide_User-Configurations/) and `overlay/` hooks,
-and remove `customize-image.sh` from `.gitignore` so it gets committed.
+On every run Armbian also creates `config-example.conf`, `overlay/` and a set of empty patch directories in
+`userpatches/`. Git ignores `config-example.conf` and doesn't track empty directories. `customize-image.sh` is
+tracked: Armbian only copies its template in when the file is absent, and this port ships its own, which
+installs the [USB gadget](usb-gadget.md) from `userpatches/overlay/usb-gadget/`. Add packages or files to the
+image there, following Armbian's
+[user configuration docs](https://docs.armbian.com/Developer-Guide_User-Configurations/).
 
 `./compile.sh` relaunches inside Docker on hosts that aren't a supported Ubuntu release. `build/cache` and
 `build/output` are bind-mounted from the host, so caches survive between builds and when the repo moves.
@@ -98,13 +101,52 @@ correctness:
 - `gmac` in RMII mode uses `rmii_pins` (the same pins as `rgmii_pins` plus RX_ER), and the `tx_delay` /
   `rx_delay` properties, which do nothing for RMII, are gone. stmmac still honours the legacy `snps,reset-gpio`.
 - The duplicated `&u2phy0_host` / `&u2phy1_host` nodes are merged.
+- `usbdrd_dwc3_0` is `dr_mode = "peripheral"` rather than the Rock Pi 4's `"host"`, so the OTG port runs as a
+  USB device. See [USB and the OTG port](#usb-and-the-otg-port).
 - `sdmmc`, `sdio0`, `pcie0`, `pcie_phy`, `hdmi` and `tcphy1` stay disabled because the hardware isn't there.
 
 Known quirk: only one xHCI controller registers. `usbdrd3_1` needs `tcphy1`, which is disabled, so `dwc3_1`
-defers forever. The HAOS port behaves the same. Which controllers the two USB ports use hasn't been confirmed;
-a USB 3.0 stick and `lsusb -t` will show it, and an unused `usbdrd3_1` can then be disabled.
+defers forever. The HAOS port behaves the same. Which controllers the two type-A ports use hasn't been
+confirmed; a USB 3.0 stick and `lsusb -t` will show it, and an unused `usbdrd3_1` can then be disabled.
 
 The DTS compiles without dtc warnings.
+
+## USB and the OTG port
+
+The RK3399 has two USB 3.0 dual-role controllers plus four USB 2.0 host controllers. Only controller 0 can be a
+USB device here, and it is also the port the BootROM enumerates on in maskrom mode (`2207:330c`):
+
+| Node                                | Physical                      | Role                                              |
+| ----------------------------------- | ----------------------------- | -------------------------------------------------- |
+| `usbdrd3_0` / `usbdrd_dwc3_0`       | OTG / flashing connector      | `dr_mode = "peripheral"`: gadget, and maskrom/loader |
+| `u2phy0_otg`, `tcphy0_usb3`         | the same connector            | its USB 2.0 and SuperSpeed PHYs                    |
+| `usbdrd3_1` / `usbdrd_dwc3_1`       | —                             | `"host"`, but never probes: `tcphy1` is disabled   |
+| `usb_host0_*`, `usb_host1_*`        | the two type-A ports          | USB 2.0 EHCI/OHCI, VBUS from `vcc5v0_host`         |
+
+**Why the role has to be set on the controller.** `phy-rockchip-inno-usb2` reads `dr_mode` from whichever
+controller references the PHY port (`of_usb_get_dr_mode_by_phy`) and, when it reads `"host"`, skips the OTG
+state machine, the `otg-bvalid` / `otg-id` interrupts and the extcon device entirely. dwc3 likewise only
+initialises xHCI on `"host"`, even though Armbian's kernel is `CONFIG_USB_DWC3_DUAL_ROLE=y`. So a `"host"`
+controller makes gadget mode impossible no matter what the PHY nodes say.
+
+**Why not `dr_mode = "otg"`.** The board has no Type-C CC controller (no `fusb302`, and `i2c4` / `i2c7` are
+disabled) and no ID pin routed, so there is nothing to switch roles from. `dwc3_get_extcon()` would also need
+an explicit `extcon = <&u2phy0>` phandle to find the PHY's extcon device, since it doesn't look there on its
+own. `"peripheral"` is deterministic and needs none of that.
+
+**U-Boot has to agree.** U-Boot builds `rock-pi-4-rk3399_defconfig` with
+`CONFIG_DEFAULT_DEVICE_TREE="rockchip/rk3399-rock-pi-4a"`, whose upstream DT also sets `dr_mode = "host"` on
+this controller. `dwc3_glue_bind()` binds the peripheral driver only for `"peripheral"` or `"otg"`, so with
+`"host"` no UDC is registered and `rockusb 0 mmc 0` and `ums 0 mmc 0` both fail — on the one port that could
+serve them. `userpatches/u-boot/v2026.07/dt_uboot/rk3399-rock-pi-4a-u-boot.dtsi` replaces U-Boot's file of the
+same name (same-basename userpatches files win, see `lib/tools/common/dt_makefile_patcher.py`) and overrides
+the mode there too.
+
+**VBUS.** Nothing on this board supplies VBUS to the OTG connector — the Rock Pi 4's `vbus_typec` regulator on
+GPIO1_A3 has no equivalent here, and `vcc5v0_host` only feeds `u2phy0_host` / `u2phy1_host`. In peripheral mode
+that is correct: the PC supplies VBUS, and the PHY uses it for `otg-bvalid` connect detection.
+
+The gadget that runs on top of this is in [usb-gadget.md](usb-gadget.md).
 
 ## Kernel configuration
 

@@ -1,7 +1,7 @@
 # Armbian for MRK3399
 
 Build scripts and board support for running [Armbian](https://www.armbian.com/) (Debian bookworm, minimal CLI)
-on the **MRK3399**, an RK3399 board with 4 GB LPDDR4, eMMC, two USB host ports and 100M Ethernet.
+on the **MRK3399**, an RK3399 board with 4 GB LPDDR4, eMMC, two USB host ports, an OTG port and 100M Ethernet.
 
 This repo does not fork [armbian/build](https://github.com/armbian/build). It pins a known-good commit of it
 and adds the board through Armbian's `userpatches` mechanism, so building an image is: clone, `make build`, flash.
@@ -24,7 +24,7 @@ and adds the board through Armbian's `userpatches` mechanism, so building an ima
 | RAM         | 4 GB LPDDR4                                                          |
 | Storage     | eMMC                                                                 |
 | Ethernet    | 100M, RMII, RTL8201F PHY                                             |
-| USB         | 2× host ports                                                        |
+| USB         | 2× host ports, plus the OTG / flashing port ([USB gadget](docs/usb-gadget.md)) |
 | Power       | RK808 PMIC + SYR827 / SYR828, the same power tree as the Radxa Rock Pi 4 |
 | Not present | SD card slot, PCIe, HDMI, Wi-Fi                                      |
 
@@ -128,6 +128,21 @@ Connect the serial console (`ttyS2`, 1500000 8N1, for example `picocom -b 150000
 board from a 5 V / 3 A supply. U-Boot waits 2 seconds for a key press, then boots. On first login Armbian asks
 for a root password and creates a user, and the root filesystem grows to fill the eMMC.
 
+## USB gadget
+
+The OTG port — the same connector used for flashing — runs as a USB device. Plug it into a PC and you get a
+network link and a login console over the one cable:
+
+```shell
+ssh root@10.55.0.1            # the board; it hands the PC 10.55.0.2 over DHCP
+scp somefile root@10.55.0.1:/root/
+picocom -b 115200 /dev/ttyACM0
+```
+
+CDC-NCM on Linux, macOS and Windows 11; RNDIS on older Windows. Configure it in
+`/etc/default/mrk3399-usb-gadget`, or turn it off with
+`systemctl disable --now mrk3399-usb-gadget`. See [docs/usb-gadget.md](docs/usb-gadget.md).
+
 ## Repository layout
 
 ```
@@ -135,15 +150,19 @@ mrk3399-armbian/
 ├── .github/workflows/release.yml # manual workflow: build the image and publish a release
 ├── Makefile                      # setup / build / uboot / kernel / clean
 ├── docs/
-│   ├── design.md                 # how the port works, boot chain, device tree, upgrading armbian/build
+│   ├── design.md                 # how the port works, boot chain, device tree, USB, upgrading armbian/build
 │   ├── flashing.md               # loader, maskrom / loader mode, rkdeveloptool
 │   ├── troubleshooting.md        # power supply, silent hangs, build problems
+│   ├── usb-gadget.md             # the OTG port as a USB device: network link and console
 │   └── uboot-board-support.md    # optional: a dedicated U-Boot defconfig and device tree
 ├── userpatches/                  # linked into build/userpatches
 │   ├── config-mrk3399.conf       # build parameters for ./compile.sh mrk3399
 │   ├── config/boards/mrk3399.csc # board definition
+│   ├── customize-image.sh        # installs the USB gadget into the image
+│   ├── overlay/usb-gadget/       # the gadget script, its config, systemd unit and .network file
 │   ├── bootenv/                  # /boot/armbianEnv.txt: mrk3399.txt, mrk3399-debug.txt
 │   ├── extensions/               # qemu-binfmt-register.sh
+│   ├── u-boot/v2026.07/dt_uboot/ # U-Boot DT override: OTG port as a gadget, for rockusb / ums
 │   └── kernel/archive/rockchip64-6.18/dt/rk3399-mrk3399.dts
 └── build/                        # armbian/build clone (created by make setup, git-ignored)
 ```
