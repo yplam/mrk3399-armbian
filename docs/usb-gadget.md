@@ -92,7 +92,7 @@ then in the script, alongside the other functions:
 mkdir -p functions/mass_storage.0
 printf '%s' /var/lib/usb-share.img > functions/mass_storage.0/lun.0/file
 printf '%s' 1 > functions/mass_storage.0/lun.0/removable
-ln -s ../../functions/mass_storage.0 configs/c.1/mass_storage.0
+ln -s functions/mass_storage.0 configs/c.1/mass_storage.0
 ```
 
 **adb** would need `adbd` on the board. Debian bookworm ships the host-side `adb` and `fastboot` but no

@@ -156,8 +156,15 @@ start() {
 	set_attr "configs/c.1/strings/${LANG_EN}/configuration" "CDC"
 	set_attr configs/c.1/bmAttributes 0xC0   # self-powered: the board has its own supply
 	set_attr configs/c.1/MaxPower 250
-	[ "${USB_GADGET_NCM}" = "yes" ] && ln -s ../../functions/ncm.usb0 configs/c.1/ncm.usb0 || true
-	[ "${USB_GADGET_ACM}" = "yes" ] && ln -s ../../functions/acm.GS0 configs/c.1/acm.GS0 || true
+	# configfs resolves a symlink target against the process's working
+	# directory, not against the directory the link goes in, so these are
+	# written relative to ${GADGET} (we cd'd there above) and not "../../".
+	if [ "${USB_GADGET_NCM}" = "yes" ]; then
+		ln -s functions/ncm.usb0 configs/c.1/ncm.usb0
+	fi
+	if [ "${USB_GADGET_ACM}" = "yes" ]; then
+		ln -s functions/acm.GS0 configs/c.1/acm.GS0
+	fi
 
 	# Configuration 2: RNDIS, which only Windows wants. The MS OS descriptors
 	# below point Windows at it; every other host stays on c.1.
@@ -166,8 +173,10 @@ start() {
 		set_attr "configs/c.2/strings/${LANG_EN}/configuration" "RNDIS"
 		set_attr configs/c.2/bmAttributes 0xC0
 		set_attr configs/c.2/MaxPower 250
-		ln -s ../../functions/rndis.usb0 configs/c.2/rndis.usb0
-		[ "${USB_GADGET_ACM}" = "yes" ] && ln -s ../../functions/acm.GS0 configs/c.2/acm.GS0 || true
+		ln -s functions/rndis.usb0 configs/c.2/rndis.usb0
+		if [ "${USB_GADGET_ACM}" = "yes" ]; then
+			ln -s functions/acm.GS0 configs/c.2/acm.GS0
+		fi
 
 		set_attr os_desc/use 1
 		set_attr os_desc/b_vendor_code 0xcd
