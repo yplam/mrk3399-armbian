@@ -16,7 +16,7 @@ Armbian looks in `userpatches/` for anything that isn't in its own tree, so noth
 | `userpatches/bootenv/mrk3399.txt`, `mrk3399-debug.txt`              | installed as `/boot/armbianEnv.txt` (selected by `BOOTENV_FILE`)                                     |
 | `userpatches/extensions/qemu-binfmt-register.sh`                    | build extension, enabled in `config-mrk3399.conf`                                                    |
 | `userpatches/u-boot/v2026.07/dt_uboot/rk3399-rock-pi-4a-u-boot.dtsi` | replaces U-Boot's own file of that name; `dt_uboot/` is copied onto `arch/arm/dts/` and same-named userpatches files win |
-| `userpatches/customize-image.sh`, `userpatches/overlay/`            | installs the USB gadget into the image; the overlay is bind-mounted at `/tmp/overlay` in the chroot   |
+| `userpatches/customize-image.sh`, `userpatches/overlay/`            | runs in the chroot: sets up the default account, installs the USB gadget; the overlay is bind-mounted at `/tmp/overlay` |
 
 On every run Armbian also creates `config-example.conf`, `overlay/` and a set of empty patch directories in
 `userpatches/`. Git ignores `config-example.conf` and doesn't track empty directories. `customize-image.sh` is
@@ -148,6 +148,42 @@ that is correct: the PC supplies VBUS, and the PHY uses it for `otg-bvalid` conn
 
 The gadget that runs on top of this is in [usb-gadget.md](usb-gadget.md).
 
+## Unattended first boot
+
+Armbian's stock image finishes configuring itself at the first root login: `distro-agnostic.sh` creates
+`/root/.not_logged_in_yet`, `/etc/profile.d/armbian-check-first-login.sh` sees it and runs
+`/usr/lib/armbian/armbian-firstlogin`, which asks for a root password, a user, a shell, a locale and a timezone.
+Upstream can preseed that wizard (`userpatches/firstboot.conf`, copied verbatim to `.not_logged_in_yet`), but it
+still only runs once someone logs in, and its `set_timezone_and_locales()` first waits for
+`systemd-networkd-wait-online` and geolocates the board over HTTP — both dead ends on a headless board with no
+network.
+
+So the port does the work at build time instead. `userpatches/config-mrk3399.conf` holds the values:
+
+| Setting | How it is applied |
+| --- | --- |
+| `MRK3399_USER`, `MRK3399_USER_PASSWORD`, `MRK3399_USER_REALNAME` | Exported into the chroot; `CreateUser` in `customize-image.sh` runs `useradd` and `chpasswd` |
+| `MRK3399_TIMEZONE` | `SetTimezone` in `customize-image.sh` |
+| `MRK3399_ROOT_PASSWORD` | Sets `ROOTPWD`, which Armbian applies while building the rootfs |
+| `MRK3399_LOCALE` | Sets `DEST_LANG`; Armbian runs `locale-gen` and `update-locale` in `rootfs-create.sh` |
+
+`customize-image.sh` then deletes `/root/.not_logged_in_yet`, so the wizard never runs. Three details come with
+that, all handled in `SkipFirstLoginWizard` and the board config:
+
+- The build strips `+x` from `/etc/update-motd.d/*` (`distro-agnostic.sh`) and the wizard is what puts it back,
+  so the script does the `chmod` — otherwise the image has no MOTD.
+- The same goes for the `AcceptEnv LANG` line in `sshd_config`, which the build comments out.
+- `CONSOLE_AUTOLOGIN` defaults to `yes`, which installs `--autologin root` overrides for `getty@` and
+  `serial-getty@`; the wizard removes them when it finishes. The board config sets `CONSOLE_AUTOLOGIN=no`
+  instead, so `ttyS2` and the gadget console `ttyGS0` show a normal login prompt.
+
+`MRK3399_TIMEZONE` can't be handled the same way as the locale: `main-config.sh` sets `TZDATA` from the build
+host's `/etc/timezone` unconditionally, after user configs are sourced, so the board config can't win.
+
+Values can be overridden per build without editing the config — `make build ARGS='MRK3399_USER=me'` — because
+`compile.sh` re-applies command-line parameters after sourcing each config file. Passwords land in the image and
+in the build log either way.
+
 ## Kernel configuration
 
 The kernel uses Armbian's `linux-rockchip64-current` config unchanged, and `KERNEL_CONFIGURE=no` keeps
@@ -179,7 +215,9 @@ fetches only the `linux-6.18.y` branch from `KERNELSOURCE` and checks it out as 
    - `config/sources/families/include/rockchip64_common.inc`: if `current` moved to a new kernel version,
      rename `userpatches/kernel/archive/rockchip64-6.18/` to match the new `KERNELPATCHDIR`, and check the DTS
      against that kernel's `rk3399.dtsi`.
-   - `lib/functions/rootfs/distro-agnostic.sh`: `BOOTENV_FILE` must still be looked up in `userpatches/bootenv/`.
+   - `lib/functions/rootfs/distro-agnostic.sh`: `BOOTENV_FILE` must still be looked up in `userpatches/bootenv/`,
+     and the assumptions behind "Unattended first boot" must still hold — `ROOTPWD`, `CONSOLE_AUTOLOGIN`,
+     `/root/.not_logged_in_yet` and the `chmod -x /etc/update-motd.d/*` line.
    - The build container: if `update-binfmts` works again, the qemu extension becomes unnecessary (it does no harm).
 3. Run `make build`, flash, and go through the [first boot checklist](../README.md#first-boot).
 

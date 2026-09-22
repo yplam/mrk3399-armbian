@@ -15,9 +15,73 @@ BUILD_DESKTOP=$4
 
 OVERLAY=/tmp/overlay
 
+# Set in userpatches/config-mrk3399.conf, which exports them into this chroot.
+# Fail loudly rather than silently building an image with no account in it.
+: "${MRK3399_USER:?not set, see the unattended first boot block in userpatches/config-mrk3399.conf}"
+: "${MRK3399_USER_PASSWORD:?not set, see the unattended first boot block in userpatches/config-mrk3399.conf}"
+: "${MRK3399_USER_REALNAME:?not set, see the unattended first boot block in userpatches/config-mrk3399.conf}"
+: "${MRK3399_TIMEZONE:?not set, see the unattended first boot block in userpatches/config-mrk3399.conf}"
+
 Main() {
+	CreateUser
+	SetTimezone
 	InstallUsbGadget
+	SkipFirstLoginWizard
 } # Main
+
+# Everything Armbian's first-login wizard would ask for, done at build time.
+# See docs/design.md, "Unattended first boot".
+
+# Mirrors add_user() in /usr/lib/armbian/armbian-firstlogin without the
+# prompts: useradd rather than adduser (adduser is optional on minimal
+# images), the same supplementary groups, then the password.
+CreateUser() {
+	local user="${MRK3399_USER}" group
+
+	echo "mrk3399: creating the ${user} account"
+	useradd --create-home --home-dir "/home/${user}" --shell /bin/bash \
+		--comment "${MRK3399_USER_REALNAME}" --user-group "${user}"
+	echo "${user}:${MRK3399_USER_PASSWORD}" | chpasswd
+
+	for group in sudo netdev audio video disk tty users games dialout plugdev \
+		input bluetooth systemd-journal ssh render; do
+		# A minimal image doesn't have all of them.
+		if getent group "${group}" > /dev/null; then
+			usermod -aG "${group}" "${user}"
+		fi
+	done
+} # CreateUser
+
+# The rootfs was built with the build host's timezone (main-config.sh reads
+# /etc/timezone and overwrites TZDATA, so the board config can't set it).
+SetTimezone() {
+	local tz="${MRK3399_TIMEZONE}"
+
+	if [ ! -f "/usr/share/zoneinfo/${tz}" ]; then
+		echo "mrk3399: MRK3399_TIMEZONE=${tz} is not a known timezone" >&2
+		exit 1
+	fi
+
+	echo "mrk3399: setting the timezone to ${tz}"
+	echo "${tz}" > /etc/timezone
+	ln -sf "/usr/share/zoneinfo/${tz}" /etc/localtime
+	dpkg-reconfigure -f noninteractive tzdata > /dev/null 2>&1
+} # SetTimezone
+
+# /root/.not_logged_in_yet makes /etc/profile.d/armbian-check-first-login.sh
+# run the wizard at the first root login. Everything it configures is already
+# in place, so drop the marker -- along with the two side effects nothing else
+# performs: the build strips +x from the motd scripts and comments out the
+# sshd AcceptEnv line, and the wizard is what restores both.
+SkipFirstLoginWizard() {
+	echo "mrk3399: disabling the Armbian first-login wizard"
+	chmod +x /etc/update-motd.d/*
+	if [ -f /etc/ssh/sshd_config ]; then
+		sed -Ei '/^[[:blank:]]*#[[:blank:]]*AcceptEnv[[:blank:]]+LANG/ s/^[[:blank:]]*#[[:blank:]]*//' \
+			/etc/ssh/sshd_config
+	fi
+	rm -f /root/.not_logged_in_yet
+} # SkipFirstLoginWizard
 
 # Composite USB gadget on the OTG port: a network link (CDC-NCM, with RNDIS for
 # older Windows) plus a serial console. Needs dr_mode = "peripheral" on

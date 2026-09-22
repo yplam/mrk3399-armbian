@@ -125,8 +125,24 @@ updating only U-Boot.
 ## First boot
 
 Connect the serial console (`ttyS2`, 1500000 8N1, for example `picocom -b 1500000 /dev/ttyUSB0`) and power the
-board from a 5 V / 3 A supply. U-Boot waits 2 seconds for a key press, then boots. On first login Armbian asks
-for a root password and creates a user, and the root filesystem grows to fill the eMMC.
+board from a 5 V / 3 A supply. U-Boot waits 2 seconds for a key press, then boots. The root filesystem grows to
+fill the eMMC, and a login prompt appears — Armbian's first-login wizard is preconfigured away, so nothing asks
+for a password, a locale or a timezone.
+
+| | |
+| --- | --- |
+| User | `mrk` / `mrk3399`, in `sudo` |
+| Root | `root` / `mrk3399` |
+| Locale, timezone | `en_US.UTF-8`, `Asia/Shanghai` |
+
+Change them in the "Unattended first boot" block of `userpatches/config-mrk3399.conf`, or per build:
+
+```shell
+make build ARGS='MRK3399_USER=me MRK3399_USER_PASSWORD=secret MRK3399_TIMEZONE=Etc/UTC'
+```
+
+The passwords are baked into the image and written to the build log, so build your own image before putting a
+board on an untrusted network. [docs/design.md](docs/design.md#unattended-first-boot) explains how it works.
 
 ## USB gadget
 

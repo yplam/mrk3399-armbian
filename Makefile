@@ -14,7 +14,12 @@ DEBUG ?= no
 # REVISION=<version>: version in image and package names, must start with a digit.
 # Empty: Armbian takes it from build/VERSION at the pinned commit.
 REVISION ?=
-ARMBIAN_ARGS := $(if $(REVISION),REVISION=$(REVISION))
+
+# ARGS='KEY=VALUE ...': extra parameters for compile.sh, overriding
+# userpatches/config-mrk3399.conf. Used for the first boot settings, e.g.
+# ARGS='MRK3399_USER=me MRK3399_TIMEZONE=Etc/UTC'.
+ARGS ?=
+ARMBIAN_ARGS := $(if $(REVISION),REVISION=$(REVISION)) $(ARGS)
 
 # Armbian relaunches itself in Docker and passes http_proxy/https_proxy through.
 # A proxy bound to 127.0.0.1 on the host is unreachable from the container, so
