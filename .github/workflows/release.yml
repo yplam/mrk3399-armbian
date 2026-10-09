@@ -3,6 +3,10 @@
 # a second build on the same day gets 2026.09.14.2, and so on. The tag is also
 # the image version: Armbian-unofficial_2026.09.14_Mrk3399_bookworm_current_<kernel>_minimal.img.xz
 #
+# Next to the image, the release carries <image name>.upgrade.tar: the files
+# U-Boot's run mrk_upgrade fetches over TFTP, to unpack on the lab server (see
+# "Network upgrade" in docs/k8s-lab.md).
+#
 # Armbian's remote cache has no artifacts for this board, so U-Boot and the
 # kernel are compiled on every run (about 2 hours on a hosted runner).
 name: Release image
@@ -77,6 +81,29 @@ jobs:
           armbian_commit=$(git -C ../.. rev-parse HEAD)
           repo_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY
 
+          # Written by userpatches/extensions/mrk3399-lab-image.sh. Plain tar:
+          # root.squashfs and boot.ext4.gz are compressed already.
+          upgrade=${image%.img.xz}.upgrade
+          upgrade_files=(manifest boot.ext4.gz root.squashfs u-boot-rockchip.bin)
+          for f in "${upgrade_files[@]}"; do
+            if [[ ! -f $upgrade/$f ]]; then
+              echo "::error::$upgrade/$f is missing"
+              ls -la "$upgrade" || true
+              exit 1
+            fi
+          done
+          tar -C "$upgrade" -cf "$upgrade.tar" --owner=0 --group=0 "${upgrade_files[@]}"
+          upgrade_sha256=$(sha256sum "$upgrade.tar" | cut -d ' ' -f 1)
+          upgrade_version=$(sed -n 's/^VERSION=//p' "$upgrade/manifest")
+
+          # The minor line the build installed (held with apt-mark hold).
+          k8s_version=$(sed -n 's/^export MRK3399_K8S_VERSION="${MRK3399_K8S_VERSION:-\([0-9.]*\)}"$/\1/p' \
+            "$GITHUB_WORKSPACE/userpatches/config-mrk3399.conf")
+          if [[ -z $k8s_version ]]; then
+            echo "::error::no MRK3399_K8S_VERSION default in userpatches/config-mrk3399.conf"
+            exit 1
+          fi
+
           cat > "$RUNNER_TEMP/notes.md" <<EOF
           Unofficial Armbian image for the MRK3399, built from [\`${GITHUB_SHA:0:7}\`]($repo_url/commit/$GITHUB_SHA).
 
@@ -85,10 +112,24 @@ jobs:
           | Image | \`$image\` |
           | Kernel | $kernel (\`$branch\`) |
           | Userspace | Debian $release, minimal |
+          | Kubernetes | kubeadm / kubelet / kubectl v$k8s_version |
           | armbian/build | [\`${armbian_commit:0:10}\`](https://github.com/armbian/build/commit/$armbian_commit) |
           | SHA-256 | \`$sha256\` |
 
           Flash with \`rkdeveloptool\`, see [docs/flashing.md]($repo_url/blob/$GITHUB_SHA/docs/flashing.md).
+
+          ### Network upgrade
+
+          \`$upgrade.tar\` (SHA-256 \`$upgrade_sha256\`) holds the files for \`run mrk_upgrade\` at the U-Boot prompt,
+          manifest version \`$upgrade_version\`. On the lab's TFTP server:
+
+          \`\`\`
+          mkdir -p /srv/tftp/mrk3399/$TAG
+          tar -xf $upgrade.tar -C /srv/tftp/mrk3399/$TAG
+          ln -sfn $TAG /srv/tftp/mrk3399/current
+          \`\`\`
+
+          The upgrade wipes the node's data partition. See [Network upgrade]($repo_url/blob/$GITHUB_SHA/docs/k8s-lab.md#network-upgrade).
           EOF
 
           gh release create "$TAG" \
@@ -96,4 +137,4 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "MRK3399 Armbian $TAG" \
             --notes-file "$RUNNER_TEMP/notes.md" \
-            "$image" "$image.sha" "${image%.xz}.txt"
+            "$image" "$image.sha" "${image%.xz}.txt" "$upgrade.tar"

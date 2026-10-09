@@ -1,0 +1,21 @@
+[Unit]
+Description=Apply node settings from the MRK3399 config partition
+Documentation=file:/run/mrk/config/README.txt
+# Only on the lab layout, where the initramfs sets up /run/mrk.
+ConditionPathIsDirectory=/run/mrk
+DefaultDependencies=no
+After=local-fs.target
+# Host name, the .network file and timesyncd's NTP servers must be in place
+# before the services that read them start; host keys before sshd.
+Before=sysinit.target network-pre.target systemd-networkd.service systemd-timesyncd.service ssh.service
+Wants=network-pre.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/mrk-node-config
+
+[Install]
+WantedBy=sysinit.target

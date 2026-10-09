@@ -1,0 +1,2 @@
+# SSH public keys allowed to log in as the default user and root, one per line
+# (the format of ~/.ssh/authorized_keys). Kept across mrk-reset and upgrades.

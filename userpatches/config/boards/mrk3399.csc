@@ -41,7 +41,7 @@ function post_family_config__mrk3399_bootenv() {
 }
 
 function post_config_uboot_target__mrk3399_uboot_config() {
-	display_alert "$BOARD" "u-boot: enable USB storage and DT overlays for ${BOOTBRANCH_BOARD}" "info"
+	display_alert "$BOARD" "u-boot: enable USB storage, DT overlays and the lab upgrade commands for ${BOOTBRANCH_BOARD}" "info"
 	# USB mass storage (the two USB ports are the only removable media on this board)
 	run_host_command_logged scripts/config --enable CONFIG_USB_STORAGE
 	# boot.scr applies overlays with 'fdt apply'
@@ -49,4 +49,22 @@ function post_config_uboot_target__mrk3399_uboot_config() {
 	# nothing on this board is behind PCIe or SPI flash
 	run_host_command_logged scripts/config --disable CONFIG_NVME_PCI
 	run_host_command_logged scripts/config --disable CONFIG_CMD_NVME
+	# boot.scr runs kaslrseed: a KASLR seed for the kernel from the SoC's
+	# hardware RNG (DM_RNG and RNG_ROCKCHIP are already on)
+	run_host_command_logged scripts/config --enable CONFIG_CMD_KASLRSEED
+	# k8s lab upgrade commands: run mrk_upgrade / mrk_upgrade_uboot at the
+	# prompt, from board_mrk3399/0003-board-rockpi4-add-the-MRK3399-lab-upgrade-environment.patch
+	# (see "Network upgrade" in docs/k8s-lab.md). bootcmd stays the default
+	# bootflow scan: a normal boot never touches the network.
+	# The environment is built in only: a saveenv'd copy on the eMMC would
+	# otherwise replace it, even across U-Boot updates.
+	run_host_command_logged scripts/config --set-str CONFIG_ENV_SOURCE_FILE mrk3399
+	run_host_command_logged scripts/config --disable CONFIG_ENV_IS_IN_MMC
+	run_host_command_logged scripts/config --enable CONFIG_ENV_IS_NOWHERE
+	# splits ADDRESS=a.b.c.d/nn and turns byte counts into block counts
+	run_host_command_logged scripts/config --enable CONFIG_CMD_SETEXPR
+	# hash -v sha256 checks each download against the manifest (SHA256 is
+	# already on); unzip, part, itest and fatwrite are on by default
+	run_host_command_logged scripts/config --enable CONFIG_CMD_HASH
+	run_host_command_logged scripts/config --enable CONFIG_HASH_VERIFY
 }

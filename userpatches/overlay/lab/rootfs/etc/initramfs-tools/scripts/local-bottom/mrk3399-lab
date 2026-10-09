@@ -1,0 +1,173 @@
+#!/bin/sh
+# MRK3399 lab layout: turn the read-only squashfs root that initramfs-tools
+# just mounted on ${rootmnt} into a writable overlay. See docs/k8s-lab.md.
+#
+#   /run/mrk/root-ro   the squashfs (mrk-root), the overlay's lower layer
+#   /run/mrk/data      mrk-data, ext4: overlay/{upper,work}, containerd,
+#                      kubelet, etcd. Created here on first boot (the image
+#                      has no data partition), formatted on reset.
+#   /run/mrk/config    mrk-config, vfat: node.conf, identity/, reset flag
+#
+# initramfs-tools moves /run into the real root at the end, so all three stay
+# visible there; /etc/fstab bind-mounts /config and the k8s directories from
+# them.
+#
+# Reset: a file "mrk-reset" on the config partition (written by mrk-reset, or
+# by U-Boot's run mrk_upgrade) or "mrk.reset" on the kernel command line
+# reformats mrk-data. Debugging:
+# "mrk.overlay=tmpfs" keeps the overlay in RAM and leaves mrk-data alone.
+
+PREREQ=""
+prereqs() { echo "${PREREQ}"; }
+case "$1" in
+	prereqs) prereqs; exit 0 ;;
+esac
+
+. /scripts/functions
+
+MRK=/run/mrk
+DATA_TYPE=0FC63DAF-8483-4772-8E79-3D69D8477DE4
+
+msg() { echo "mrk3399-lab: $*"; }
+warn() { log_warning_msg "mrk3399-lab: $*"; }
+
+# Only the lab layout: root is a squashfs from the mrk-root partition.
+grep -q "^[^ ]* ${rootmnt} squashfs " /proc/mounts || exit 0
+
+opt_overlay=""
+opt_reset=""
+for x in $(cat /proc/cmdline); do
+	case "${x}" in
+		mrk.overlay=*) opt_overlay="${x#mrk.overlay=}" ;;
+		mrk.reset) opt_reset=1 ;;
+	esac
+done
+
+# partdev <label> [seconds]: the device node of a GPT partition by its label,
+# waiting up to <seconds> for udev to create the link.
+partdev() {
+	i=0
+	while [ ! -e "/dev/disk/by-partlabel/$1" ] && [ "${i}" -lt "${2:-0}" ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	[ -e "/dev/disk/by-partlabel/$1" ] && readlink -f "/dev/disk/by-partlabel/$1"
+}
+
+# The image is smaller than the eMMC and ends at the root partition. Move the
+# backup GPT to the end of the disk and give the rest to mrk-data. The other
+# partitions are in use (the root is mounted), so the kernel is told about
+# the new one alone with partx rather than by rereading the whole table.
+create_data_partition() {
+	rootdev=$(partdev mrk-root) || return 1
+	disk="/dev/$(basename "$(readlink -f "/sys/class/block/${rootdev##*/}/..")")"
+	[ -b "${disk}" ] || { warn "can't find the disk holding ${rootdev}"; return 1; }
+
+	msg "creating the data partition on ${disk}"
+	sfdisk --no-reread --quiet --relocate gpt-bak-std "${disk}" || return 1
+	echo "type=${DATA_TYPE}, name=\"mrk-data\"" |
+		sfdisk --no-reread --no-tell-kernel --quiet --append "${disk}" || return 1
+
+	part=$(sfdisk -d "${disk}" | sed -n 's|^\(/dev/[^ ]*\) .*name="mrk-data".*|\1|p')
+	[ -n "${part}" ] || { warn "mrk-data missing from the new partition table"; return 1; }
+	partx --add --nr "${part##*[!0-9]}" "${disk}" || return 1
+	udevadm settle
+}
+
+mkdir -p "${MRK}/root-ro" "${MRK}/data" "${MRK}/config"
+
+# --- config partition ------------------------------------------------------
+
+config_ok=""
+if cfgdev=$(partdev mrk-config 5); then
+	if mount -t vfat -o rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro \
+		"${cfgdev}" "${MRK}/config"; then
+		config_ok=1
+	else
+		warn "can't mount the config partition ${cfgdev}"
+	fi
+else
+	warn "no config partition (mrk-config); the node gets a new identity on every boot"
+fi
+
+reset="${opt_reset}"
+[ -n "${config_ok}" ] && [ -e "${MRK}/config/mrk-reset" ] && reset=1
+
+# --- data partition --------------------------------------------------------
+
+data_ok=""
+if [ "${opt_overlay}" = tmpfs ]; then
+	msg "mrk.overlay=tmpfs: overlay in RAM, mrk-data left alone"
+else
+	format=""
+	datadev=$(partdev mrk-data)
+	if [ -z "${datadev}" ]; then
+		if create_data_partition && datadev=$(partdev mrk-data 10); then
+			format=1
+		else
+			warn "couldn't create the data partition"
+		fi
+	fi
+
+	if [ -n "${datadev}" ]; then
+		if [ -n "${reset}" ] && [ -z "${format}" ]; then
+			msg "reset requested: wiping the data partition"
+			format=1
+		fi
+		if [ -n "${format}" ]; then
+			mkfs.ext4 -q -F -L mrk-data "${datadev}" || warn "mkfs.ext4 ${datadev} failed"
+		else
+			# 0: clean, 1: errors corrected. Anything else needs a human.
+			e2fsck -p "${datadev}"
+			[ $? -le 1 ] || warn "e2fsck found problems on ${datadev} it couldn't fix"
+		fi
+		if mount -t ext4 -o noatime "${datadev}" "${MRK}/data"; then
+			data_ok=1
+			# Only now is the reset done: a failed one is retried next boot.
+			[ -n "${format}" ] && [ -n "${config_ok}" ] && rm -f "${MRK}/config/mrk-reset"
+		else
+			warn "can't mount ${datadev}; run mrk-reset to reformat it"
+		fi
+	fi
+fi
+
+if [ -z "${data_ok}" ]; then
+	[ "${opt_overlay}" = tmpfs ] || warn "OVERLAY IN RAM: changes and Kubernetes state are lost at reboot"
+	mount -t tmpfs -o mode=0755,size=50% tmpfs "${MRK}/data"
+fi
+
+mkdir -p "${MRK}/data/overlay/upper" "${MRK}/data/overlay/work" \
+	"${MRK}/data/containerd" "${MRK}/data/kubelet" "${MRK}/data/etcd"
+chmod 0700 "${MRK}/data/etcd"
+
+# --- overlay root ----------------------------------------------------------
+
+mount --move "${rootmnt}" "${MRK}/root-ro" || panic "mrk3399-lab: can't move the squashfs root"
+if ! mount -t overlay overlay \
+	-o "lowerdir=${MRK}/root-ro,upperdir=${MRK}/data/overlay/upper,workdir=${MRK}/data/overlay/work" \
+	"${rootmnt}"; then
+	warn "can't mount the overlay; booting the read-only squashfs as is"
+	mount --move "${MRK}/root-ro" "${rootmnt}"
+	exit 0
+fi
+
+# --- identity --------------------------------------------------------------
+
+# machine-id has to be in place before systemd starts, so it's restored here
+# rather than by mrk-node-config. Kept on the config partition, it survives
+# resets and upgrades: Kubernetes sees the same machine coming back.
+if [ -n "${config_ok}" ]; then
+	idfile="${MRK}/config/identity/machine-id"
+	id=""
+	[ -r "${idfile}" ] && id=$(tr -dc '0-9a-f' < "${idfile}")
+	if [ "${#id}" -ne 32 ]; then
+		id=$(tr -dc '0-9a-f' < /proc/sys/kernel/random/uuid)
+		mkdir -p "${MRK}/config/identity"
+		echo "${id}" > "${idfile}"
+		msg "new machine-id ${id}"
+	fi
+	echo "${id}" > "${rootmnt}/etc/machine-id"
+fi
+
+msg "root: squashfs + overlay on $([ -n "${data_ok}" ] && echo mrk-data || echo tmpfs)$([ -n "${reset}" ] && echo ', after reset')"
+exit 0

@@ -1,0 +1,44 @@
+#!/bin/sh
+# Adds what scripts/local-bottom/mrk3399-lab needs to the initramfs: the
+# overlay module, and the tools to create, check and format the data
+# partition. See docs/k8s-lab.md.
+
+PREREQ=""
+prereqs() { echo "${PREREQ}"; }
+case "$1" in
+	prereqs) prereqs; exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+manual_add_modules overlay
+# The config partition is vfat. The kernel has CONFIG_FAT_DEFAULT_UTF8=y, so
+# every vfat mount needs the utf8 NLS table (iso8859-1 is the fallback
+# iocharset); both are modules, and without them the mount fails with "IO
+# charset utf8 not found". nls_cp437 (the default codepage) is built in.
+manual_add_modules nls_utf8 nls_iso8859_1
+
+for tool in sfdisk partx e2fsck; do
+	path=$(command -v "${tool}") || { echo "mrk3399-lab: ${tool} not found" >&2; exit 1; }
+	copy_exec "${path}" /sbin
+done
+
+# e2fsprogs' mke2fs goes in as mkfs.ext4: zz-busybox runs before this hook
+# and has already linked its own mke2fs applet (no ext4, no journal), and
+# copy_exec silently keeps an existing file. Busybox has no mkfs.ext4.
+path=$(command -v mke2fs) || { echo "mrk3399-lab: mke2fs not found" >&2; exit 1; }
+copy_exec "${path}" /usr/sbin/mkfs.ext4
+if ! cmp -s "${path}" "${DESTDIR}/usr/sbin/mkfs.ext4"; then
+	echo "mrk3399-lab: /usr/sbin/mkfs.ext4 in the initramfs isn't e2fsprogs' mke2fs" >&2
+	exit 1
+fi
+# mke2fs works without it, but then ignores the distribution's defaults
+# (ext4 features, inode ratio).
+copy_file config /etc/mke2fs.conf /etc/mke2fs.conf
+
+# No battery-backed RTC: early in boot the clock is whatever it was at the
+# last shutdown (or 1970), so the data partition's last mount/write times
+# look like they're in the future, which e2fsck -p would otherwise refuse
+# to preen.
+mkdir -p "${DESTDIR}/etc"
+printf '[options]\n\tbroken_system_clock = 1\n' > "${DESTDIR}/etc/e2fsck.conf"

@@ -1,0 +1,385 @@
+From: yplam <yplam@yplam.com>
+Subject: [PATCH] board: rockpi4: add the MRK3399 lab upgrade environment
+
+A text environment (board/radxa/rockpi4-rk3399/mrk3399.env, selected with
+CONFIG_ENV_SOURCE_FILE="mrk3399" by the board config) with two commands
+for the U-Boot prompt; a normal boot never touches the network.
+
+run mrk_upgrade fetches the manifest from the lab server over TFTP and
+checks that each image's size fits its RAM buffer and its partition
+(mrk-root, mrk-boot); then fetches root.squashfs and boot.ext4.gz and
+checks their size and sha256 against the manifest; and only then writes a
+mrk-reset flag on the config partition (mmc 0:2), the boot image and the
+root image. run mrk_upgrade_uboot does the same for
+u-boot-rockchip.bin at sector 0x40, and skips the write when the eMMC
+already holds an identical copy.
+
+The server is serverip as set by hand, else LAB_SERVER from node.conf on
+the config partition; the address is ipaddr as set by hand, else ADDRESS
+from node.conf, else DHCP.
+
+Used with ENV_IS_NOWHERE, CMD_SETEXPR and CMD_HASH with HASH_VERIFY;
+nothing is saved to the eMMC.
+
+---
+diff --git a/board/radxa/rockpi4-rk3399/mrk3399.env b/board/radxa/rockpi4-rk3399/mrk3399.env
+new file mode 100644
+--- /dev/null
++++ b/board/radxa/rockpi4-rk3399/mrk3399.env
+@@ -0,0 +1,356 @@
++/*
++ * MRK3399 k8s lab: network upgrade commands, typed at the U-Boot prompt
++ * (see "Network upgrade" in docs/k8s-lab.md of the mrk3399-armbian repo).
++ * A normal boot never touches the network.
++ *
++ *   run mrk_upgrade        boot (p1) and root (p3), and a mrk-reset flag on
++ *                          the config partition: data is wiped at next boot
++ *   run mrk_upgrade_uboot  the bootloader only
++ *
++ * Both fetch ${mrk_dir}/manifest and the images over TFTP from serverip:
++ * as set by hand (setenv serverip ...), else LAB_SERVER from node.conf on
++ * the config partition. The node uses ipaddr if already set, else ADDRESS
++ * from node.conf, else DHCP. Each image's size from the manifest is checked
++ * against its RAM buffer and its partition before any download, and each
++ * download against the manifest's size and sha256; only then is anything
++ * written.
++ *
++ * The environment is built in only (ENV_IS_NOWHERE): nothing here is ever
++ * saved, so overrides last until the next reset.
++ *
++ * This file goes through the C preprocessor: comments only in this style,
++ * no lines starting with a hash, and URLs only inside double quotes.
++ * Lines of a variable are joined with spaces, so every command ends with ;
++ */
++
++mrk_cfgpart=mmc 0:2
++mrk_dir=mrk3399/current
++
++/*
++ * RAM for the downloads (4 GB boards), clear of kernel_addr_r up to
++ * ramdisk_addr_r (0x02000000 to 0x12180000 and the initrd after it) and of
++ * U-Boot, relocated just below 0xf8000000. The manifest and the reset flag
++ * use scriptaddr.
++ *   root.squashfs  mrk_root_addr    up to mrk_root_max (2 GiB)
++ *   boot.ext4.gz   mrk_bootgz_addr  up to 256 MiB
++ *   boot.ext4      mrk_boot_addr    up to mrk_boot_max (256 MiB), unzipped
++ * TFTP only stops at memory U-Boot has reserved, so the sizes are checked
++ * before downloading: a root image larger than its buffer would otherwise
++ * be overwritten by boot.ext4.gz after its sha256 check. An oversized
++ * boot.ext4.gz fails the boot.ext4 sha256 check.
++ * mrk_upgrade_uboot downloads into the root buffer and reads the current
++ * bootloader back into the boot buffer.
++ */
++mrk_root_addr=0x20000000
++mrk_root_max=0x80000000
++mrk_bootgz_addr=0xa0000000
++mrk_boot_addr=0xb0000000
++mrk_boot_max=0x10000000
++
++/* The bootloader: from sector 0x40 (32 KiB) up to the first partition (16 MiB). */
++mrk_uboot_start=0x40
++mrk_uboot_max=0x7fc0
++
++autoload=no
++netretry=no
++bootpretryperiod=10000
++
++mrk_upgrade=
++	run mrk_setup;
++	if test "${mrk_go}" = yes; then run mrk_os_manifest; fi;
++	if test "${mrk_go}" = yes; then run mrk_os_fit; fi;
++	if test "${mrk_go}" = yes; then run mrk_os_root; fi;
++	if test "${mrk_go}" = yes; then run mrk_os_boot; fi;
++	if test "${mrk_go}" = yes; then
++		run mrk_os_write;
++	else
++		echo "mrk: upgrade aborted, nothing written";
++	fi
++
++mrk_upgrade_uboot=
++	run mrk_setup;
++	if test "${mrk_go}" = yes; then run mrk_uboot_manifest; fi;
++	if test "${mrk_go}" = yes; then run mrk_uboot_get; fi;
++	if test "${mrk_go}" = yes; then
++		run mrk_uboot_write;
++	else
++		echo "mrk: bootloader upgrade aborted, nothing written";
++	fi
++
++/*
++ * Common start: node.conf, network, server. mrk_go stays yes while all
++ * goes well; each later step runs only then. dhcp replaces serverip with
++ * the DHCP next-server, so the value from before (set by hand, or by an
++ * earlier run) is put back afterwards.
++ */
++mrk_setup=
++	setenv mrk_go yes;
++	setenv mrk_srv "${serverip}";
++	run mrk_conf;
++	run mrk_net;
++	if test -n "${mrk_srv}"; then
++		setenv serverip "${mrk_srv}";
++	else
++		setenv serverip "${LAB_SERVER}";
++	fi;
++	if test "${mrk_go}" = yes; then
++		if test -z "${serverip}"; then
++			echo "mrk: no server: set LAB_SERVER in node.conf, or setenv serverip";
++			setenv mrk_go no;
++		else
++			echo "mrk: server ${serverip}, directory ${mrk_dir}";
++		fi;
++	fi
++
++/* Only these three keys are taken from node.conf. */
++mrk_conf=
++	setenv ADDRESS; setenv GATEWAY; setenv LAB_SERVER;
++	if load ${mrk_cfgpart} ${scriptaddr} node.conf; then
++		env import -t -r ${scriptaddr} ${filesize} ADDRESS GATEWAY LAB_SERVER;
++	else
++		echo "mrk: no node.conf on ${mrk_cfgpart}";
++	fi
++
++/*
++ * ipaddr already set (by hand, or by an earlier run): used as is, with
++ * netmask and gatewayip as they are. Else the static address/prefix from
++ * ADDRESS, else DHCP (also when ADDRESS is not address/prefix, as the OS
++ * does). Only the shape of the address is checked: an octet above 255
++ * passes here, as in the OS, and the network then fails. setexpr sub
++ * leaves its variable as it was when nothing matches, hence the clearing.
++ */
++mrk_net=
++	if test -n "${ipaddr}"; then
++		echo "mrk: address ${ipaddr} already set";
++	else
++		if test -n "${ADDRESS}" && test "${ADDRESS}" != dhcp; then
++			setenv netmask; setenv mrk_addr; setenv mrk_prefix; setenv mrk_rest;
++			setexpr mrk_addr sub "/.*" "" "${ADDRESS}";
++			setexpr mrk_prefix sub "^[^/]*/" "" "${ADDRESS}";
++			setexpr mrk_rest sub "^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+" "" "${mrk_addr}";
++			if test -z "${mrk_rest}"; then run mrk_netmask; fi;
++			if test -n "${netmask}"; then
++				setenv ipaddr "${mrk_addr}";
++				setenv gatewayip "${GATEWAY}";
++				echo "mrk: static address ${ipaddr}/${mrk_prefix}";
++			else
++				echo "mrk: ADDRESS=${ADDRESS} is not address/prefix, using DHCP";
++			fi;
++		fi;
++		if test -z "${ipaddr}"; then
++			if dhcp; then
++				echo "mrk: DHCP address ${ipaddr}";
++			else
++				echo "mrk: DHCP failed";
++				setenv mrk_go no;
++			fi;
++		fi;
++	fi
++
++mrk_netmask=
++	if test "${mrk_prefix}" = 8; then setenv netmask 255.0.0.0;
++	elif test "${mrk_prefix}" = 9; then setenv netmask 255.128.0.0;
++	elif test "${mrk_prefix}" = 10; then setenv netmask 255.192.0.0;
++	elif test "${mrk_prefix}" = 11; then setenv netmask 255.224.0.0;
++	elif test "${mrk_prefix}" = 12; then setenv netmask 255.240.0.0;
++	elif test "${mrk_prefix}" = 13; then setenv netmask 255.248.0.0;
++	elif test "${mrk_prefix}" = 14; then setenv netmask 255.252.0.0;
++	elif test "${mrk_prefix}" = 15; then setenv netmask 255.254.0.0;
++	elif test "${mrk_prefix}" = 16; then setenv netmask 255.255.0.0;
++	elif test "${mrk_prefix}" = 17; then setenv netmask 255.255.128.0;
++	elif test "${mrk_prefix}" = 18; then setenv netmask 255.255.192.0;
++	elif test "${mrk_prefix}" = 19; then setenv netmask 255.255.224.0;
++	elif test "${mrk_prefix}" = 20; then setenv netmask 255.255.240.0;
++	elif test "${mrk_prefix}" = 21; then setenv netmask 255.255.248.0;
++	elif test "${mrk_prefix}" = 22; then setenv netmask 255.255.252.0;
++	elif test "${mrk_prefix}" = 23; then setenv netmask 255.255.254.0;
++	elif test "${mrk_prefix}" = 24; then setenv netmask 255.255.255.0;
++	elif test "${mrk_prefix}" = 25; then setenv netmask 255.255.255.128;
++	elif test "${mrk_prefix}" = 26; then setenv netmask 255.255.255.192;
++	elif test "${mrk_prefix}" = 27; then setenv netmask 255.255.255.224;
++	elif test "${mrk_prefix}" = 28; then setenv netmask 255.255.255.240;
++	elif test "${mrk_prefix}" = 29; then setenv netmask 255.255.255.248;
++	elif test "${mrk_prefix}" = 30; then setenv netmask 255.255.255.252;
++	fi
++
++/*
++ * The manifest goes to scriptaddr; each command imports only the keys it
++ * uses. File names are fixed here, not taken from the manifest.
++ */
++mrk_manifest=
++	if tftpboot ${scriptaddr} ${mrk_dir}/manifest; then
++		setenv mrk_mlen ${filesize};
++	else
++		echo "mrk: cannot fetch ${mrk_dir}/manifest from ${serverip}";
++		setenv mrk_go no;
++	fi
++
++/*
++ * Sets mrk_blks: mrk_size bytes (from the manifest) in 512-byte blocks.
++ * Downloads are checked to be exactly mrk_size bytes, so this holds for
++ * them too.
++ */
++mrk_blocks=
++	setexpr mrk_blks ${mrk_size} + 1ff;
++	setexpr mrk_blks ${mrk_blks} / 200
++
++/*
++ * Before downloading: checks that mrk_size bytes fit the RAM buffer of
++ * mrk_max bytes and partition mrk_part. Sets mrk_blks, mrk_start and
++ * mrk_psize (blocks, hex).
++ */
++mrk_fit=
++	run mrk_blocks;
++	if itest ${mrk_size} -gt ${mrk_max}; then
++		echo "mrk: ${mrk_file} is ${mrk_size} bytes, its RAM buffer only holds ${mrk_max}";
++		setenv mrk_go no;
++	elif part start mmc 0 ${mrk_part} mrk_start && part size mmc 0 ${mrk_part} mrk_psize; then
++		if itest ${mrk_blks} -gt ${mrk_psize}; then
++			echo "mrk: ${mrk_file} needs 0x${mrk_blks} blocks, ${mrk_part} has 0x${mrk_psize}";
++			setenv mrk_go no;
++		fi;
++	else
++		echo "mrk: no partition ${mrk_part} on mmc 0";
++		setenv mrk_go no;
++	fi
++
++/*
++ * Checks the ${filesize} bytes at mrk_buf against mrk_size and mrk_sha
++ * from the manifest. Sets mrk_len (bytes, hex).
++ */
++mrk_check=
++	setenv mrk_len ${filesize};
++	if itest ${mrk_len} -ne ${mrk_size}; then
++		echo "mrk: ${mrk_file} is 0x${mrk_len} bytes, the manifest says ${mrk_size}";
++		setenv mrk_go no;
++	elif hash -v sha256 ${mrk_buf} ${mrk_len} ${mrk_sha}; then
++		echo "mrk: ${mrk_file}: sha256 OK";
++	else
++		echo "mrk: ${mrk_file}: sha256 mismatch";
++		setenv mrk_go no;
++	fi
++
++mrk_os_manifest=
++	run mrk_manifest;
++	if test "${mrk_go}" = yes; then
++		setenv VERSION; setenv BOOT_SIZE; setenv BOOT_SHA256; setenv ROOT_SIZE; setenv ROOT_SHA256;
++		env import -t -r ${scriptaddr} ${mrk_mlen} VERSION BOOT_SIZE BOOT_SHA256 ROOT_SIZE ROOT_SHA256;
++		if test -z "${VERSION}" || test -z "${BOOT_SIZE}" || test -z "${BOOT_SHA256}" ||
++		   test -z "${ROOT_SIZE}" || test -z "${ROOT_SHA256}"; then
++			echo "mrk: the manifest lacks VERSION, BOOT_SIZE/SHA256 or ROOT_SIZE/SHA256";
++			setenv mrk_go no;
++		else
++			echo "mrk: manifest of ${VERSION}";
++		fi;
++	fi
++
++mrk_os_fit=
++	setenv mrk_file root.squashfs; setenv mrk_size ${ROOT_SIZE};
++	setenv mrk_max ${mrk_root_max}; setenv mrk_part mrk-root;
++	run mrk_fit;
++	setenv mrk_root_start ${mrk_start}; setenv mrk_root_blks ${mrk_blks}; setenv mrk_root_psize ${mrk_psize};
++	if test "${mrk_go}" = yes; then
++		setenv mrk_file boot.ext4; setenv mrk_size ${BOOT_SIZE};
++		setenv mrk_max ${mrk_boot_max}; setenv mrk_part mrk-boot;
++		run mrk_fit;
++		setenv mrk_boot_start ${mrk_start}; setenv mrk_boot_blks ${mrk_blks}; setenv mrk_boot_psize ${mrk_psize};
++	fi
++
++mrk_os_root=
++	setenv mrk_file root.squashfs; setenv mrk_buf ${mrk_root_addr};
++	setenv mrk_size ${ROOT_SIZE}; setenv mrk_sha ${ROOT_SHA256};
++	if tftpboot ${mrk_buf} ${mrk_dir}/${mrk_file}; then
++		run mrk_check;
++	else
++		echo "mrk: cannot fetch ${mrk_dir}/${mrk_file} from ${serverip}";
++		setenv mrk_go no;
++	fi
++
++/*
++ * The explicit maximum matters: gunzip() takes it as an int, and unzip's
++ * default of ~0UL turns into -1.
++ */
++mrk_os_boot=
++	setenv mrk_file boot.ext4; setenv mrk_buf ${mrk_boot_addr};
++	setenv mrk_size ${BOOT_SIZE}; setenv mrk_sha ${BOOT_SHA256};
++	if tftpboot ${mrk_bootgz_addr} ${mrk_dir}/${mrk_file}.gz; then
++		if unzip ${mrk_bootgz_addr} ${mrk_buf} ${mrk_boot_max}; then
++			run mrk_check;
++		else
++			echo "mrk: ${mrk_file}.gz does not unzip into ${mrk_boot_max} bytes";
++			setenv mrk_go no;
++		fi;
++	else
++		echo "mrk: cannot fetch ${mrk_dir}/${mrk_file}.gz from ${serverip}";
++		setenv mrk_go no;
++	fi
++
++/*
++ * The mrk-reset flag goes first: a power cut after it only wipes the data
++ * partition (harmless), whereas a new root without it would run on a stale
++ * overlay. An interrupted write leaves U-Boot intact: run mrk_upgrade
++ * again. No reset here, so the result stays on the screen.
++ */
++mrk_os_write=
++	echo "mrk: writing ${VERSION}";
++	echo "mrk:   mrk-boot: 0x${mrk_boot_blks} of 0x${mrk_boot_psize} blocks";
++	echo "mrk:   mrk-root: 0x${mrk_root_blks} of 0x${mrk_root_psize} blocks";
++	setenv mrk_upgraded "${VERSION}";
++	env export -t ${scriptaddr} mrk_upgraded;
++	setexpr mrk_len ${filesize} - 1;
++	if fatwrite ${mrk_cfgpart} ${scriptaddr} mrk-reset ${mrk_len}; then
++		if mmc dev 0 &&
++		   mmc write ${mrk_boot_addr} ${mrk_boot_start} ${mrk_boot_blks} &&
++		   mmc write ${mrk_root_addr} ${mrk_root_start} ${mrk_root_blks}; then
++			echo "mrk: upgraded to ${VERSION}, run reset";
++		else
++			echo "mrk: eMMC write failed, the OS may not boot: run mrk_upgrade again";
++		fi;
++	else
++		echo "mrk: cannot write mrk-reset on ${mrk_cfgpart}, nothing else written";
++	fi
++
++mrk_uboot_manifest=
++	run mrk_manifest;
++	if test "${mrk_go}" = yes; then
++		setenv VERSION; setenv UBOOT_SIZE; setenv UBOOT_SHA256;
++		env import -t -r ${scriptaddr} ${mrk_mlen} VERSION UBOOT_SIZE UBOOT_SHA256;
++		if test -z "${VERSION}" || test -z "${UBOOT_SIZE}" || test -z "${UBOOT_SHA256}"; then
++			echo "mrk: the manifest lacks VERSION or UBOOT_SIZE/SHA256";
++			setenv mrk_go no;
++		else
++			echo "mrk: manifest of ${VERSION}";
++		fi;
++	fi
++
++/* The 16 MiB limit is checked first; the root buffer holds far more. */
++mrk_uboot_get=
++	setenv mrk_file u-boot-rockchip.bin; setenv mrk_buf ${mrk_root_addr};
++	setenv mrk_size ${UBOOT_SIZE}; setenv mrk_sha ${UBOOT_SHA256};
++	run mrk_blocks;
++	if itest ${mrk_blks} -gt ${mrk_uboot_max}; then
++		echo "mrk: ${mrk_file} needs 0x${mrk_blks} blocks, only ${mrk_uboot_max} fit before 16 MiB";
++		setenv mrk_go no;
++	elif tftpboot ${mrk_buf} ${mrk_dir}/${mrk_file}; then
++		run mrk_check;
++	else
++		echo "mrk: cannot fetch ${mrk_dir}/${mrk_file} from ${serverip}";
++		setenv mrk_go no;
++	fi
++
++/* Writes only when the bootloader on the eMMC differs. */
++mrk_uboot_write=
++	if mmc dev 0 && mmc read ${mrk_boot_addr} ${mrk_uboot_start} ${mrk_blks}; then
++		if cmp.b ${mrk_root_addr} ${mrk_boot_addr} ${mrk_len}; then
++			echo "mrk: the bootloader on the eMMC is the one of ${VERSION}, nothing written";
++		else
++			echo "mrk: WARNING: writing the bootloader of ${VERSION}. A bad one only recovers in maskrom mode";
++			if mmc write ${mrk_root_addr} ${mrk_uboot_start} ${mrk_blks}; then
++				echo "mrk: bootloader upgraded to ${VERSION}, run reset";
++			else
++				echo "mrk: bootloader write failed, do not reset: run mrk_upgrade_uboot again";
++			fi;
++		fi;
++	else
++		echo "mrk: cannot read the current bootloader, nothing written";
++	fi

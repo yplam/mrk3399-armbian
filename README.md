@@ -11,6 +11,7 @@ and adds the board through Armbian's `userpatches` mechanism, so building an ima
 | Kernel    | 6.18 (Armbian `current`, `rockchip64` family)                    |
 | U-Boot    | v2026.07, mainline TPL + SPL + ATF, no Rockchip binary blobs     |
 | Userspace | Debian 12 bookworm, minimal                                      |
+| Kubernetes | kubeadm / kubelet / kubectl 1.37, containerd 2.x ([docs/k8s.md](docs/k8s.md)) |
 | Console   | `ttyS2`, 1500000 8N1                                             |
 
 > These are unofficial images (`Armbian-unofficial_*`). The MRK3399 is not an Armbian-supported board,
@@ -103,7 +104,8 @@ so a proxy is the more reliable route. Don't combine the two.
 
 Prebuilt images are on the [Releases](https://github.com/yplam/mrk3399-armbian/releases) page. They're built by
 the [`Release image`](.github/workflows/release.yml) workflow, which is started by hand from the Actions tab. It runs
-`make build` on a GitHub-hosted runner and publishes the `.img.xz`, `.sha` and `.img.txt` as a release tagged with
+`make build` on a GitHub-hosted runner and publishes the `.img.xz`, `.sha`, `.img.txt` and the
+[network upgrade](docs/k8s-lab.md#network-upgrade) files as `.upgrade.tar` in a release tagged with
 the UTC build date, for example `2026.09.14` (a second build that day becomes `2026.09.14.2`). The tag is passed as
 `REVISION`, so it's also the version in the image name. Armbian has no cached kernel or U-Boot for this board, so
 each run compiles both and takes about 2 hours. If the build fails, its logs are attached to the run as `build-logs`.
@@ -125,9 +127,8 @@ updating only U-Boot.
 ## First boot
 
 Connect the serial console (`ttyS2`, 1500000 8N1, for example `picocom -b 1500000 /dev/ttyUSB0`) and power the
-board from a 5 V / 3 A supply. U-Boot waits 2 seconds for a key press, then boots. The root filesystem grows to
-fill the eMMC, and a login prompt appears — Armbian's first-login wizard is preconfigured away, so nothing asks
-for a password, a locale or a timezone.
+board from a 5 V / 3 A supply. U-Boot waits 2 seconds for a key press, then boots, and a login prompt appears —
+Armbian's first-login wizard is preconfigured away, so nothing asks for a password, a locale or a timezone.
 
 | | |
 | --- | --- |
@@ -159,6 +160,12 @@ CDC-NCM on Linux, macOS and Windows 11; RNDIS on older Windows. Configure it in
 `/etc/default/mrk3399-usb-gadget`, or turn it off with
 `systemctl disable --now mrk3399-usb-gadget`. See [docs/usb-gadget.md](docs/usb-gadget.md).
 
+## Kubernetes
+
+The image is a kubeadm-ready node: containerd with the systemd cgroup driver, kubeadm, kubelet and kubectl from
+`pkgs.k8s.io` (held at the `MRK3399_K8S_VERSION` minor), swap off, and the modules and sysctls kubeadm checks for.
+kubelet waits for NTP, so a node needs a reachable time server. See [docs/k8s.md](docs/k8s.md).
+
 ## Repository layout
 
 ```
@@ -168,17 +175,23 @@ mrk3399-armbian/
 ├── docs/
 │   ├── design.md                 # how the port works, boot chain, device tree, USB, upgrading armbian/build
 │   ├── flashing.md               # loader, maskrom / loader mode, rkdeveloptool
+│   ├── k8s.md                    # the image as a kubeadm node: packages, host settings, build variables
+│   ├── k8s-lab.md                # lab nodes: image layout, config partition, reset and upgrade
 │   ├── troubleshooting.md        # power supply, silent hangs, build problems
 │   ├── usb-gadget.md             # the OTG port as a USB device: network link and console
 │   └── uboot-board-support.md    # optional: a dedicated U-Boot defconfig and device tree
 ├── userpatches/                  # linked into build/userpatches
 │   ├── config-mrk3399.conf       # build parameters for ./compile.sh mrk3399
 │   ├── config/boards/mrk3399.csc # board definition
-│   ├── customize-image.sh        # installs the USB gadget into the image
+│   ├── customize-image.sh        # account, timezone, USB gadget, Kubernetes packages, no swap
 │   ├── overlay/usb-gadget/       # the gadget script, its config, systemd unit and .network file
+│   ├── overlay/k8s/              # modules, sysctls, crictl config, kubelet time-sync drop-in
+│   ├── overlay/lab/config/       # default contents of the config partition (node.conf)
+│   ├── overlay/lab/rootfs/       # initramfs hook and script, mrk-node-config, mrk-reset
 │   ├── bootenv/                  # /boot/armbianEnv.txt: mrk3399.txt, mrk3399-debug.txt
-│   ├── extensions/               # qemu-binfmt-register.sh
-│   ├── u-boot/v2026.07/dt_uboot/ # U-Boot DT override: OTG port as a gadget, for rockusb / ums
+│   ├── extensions/               # qemu-binfmt-register.sh, mrk3399-lab-image.sh (squashfs layout)
+│   ├── u-boot/v2026.07/dt_uboot/ # U-Boot DT override: OTG port as a gadget, gmac as RMII
+│   ├── u-boot/v2026.07/board_mrk3399/ # U-Boot patches: RK3399 RMII support, internal gmac clock, lab upgrade commands
 │   └── kernel/archive/rockchip64-6.18/dt/rk3399-mrk3399.dts
 └── build/                        # armbian/build clone (created by make setup, git-ignored)
 ```

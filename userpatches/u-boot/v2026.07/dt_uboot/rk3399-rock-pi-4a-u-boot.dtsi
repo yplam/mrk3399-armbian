@@ -37,3 +37,45 @@
 &usbdrd_dwc3_0 {
 	dr_mode = "peripheral";
 };
+
+/*
+ * The Rock Pi 4 has an RGMII gigabit PHY; the MRK3399 has an RTL8201F on
+ * RMII. Match the gmac node in rk3399-mrk3399.dts so U-Boot can netboot:
+ * RMII pins and mode, no RGMII delays. U-Boot's RK3399 GMAC driver only
+ * gained RMII support through
+ * board_mrk3399/0001-net-gmac_rockchip-add-RMII-support-for-RK3399.patch.
+ *
+ * Reference clock: the RTL8201F has no crystal and runs from the 50 MHz the
+ * SoC sends out on mac_clk (clock_in_out = "output"), generated internally
+ * from clk_gmac. Linux ends up the same way (clk_rmii_src under clk_gmac in
+ * clk_summary) despite the kernel DT naming clkin_gmac as parent. Without
+ * this clock the PHY never answers on MDIO. The Rock Pi 4 node selects
+ * clkin_gmac, so switch the parent to SCLK_MAC; gmac_rockchip then sets it to
+ * 50 MHz, which needs
+ * board_mrk3399/0002-clk-rk3399-generate-the-gmac-clock-internally.patch.
+ *
+ * phy-supply: on the Rock Pi 4 the PHY sits on vcc3v3_lan, a fixed
+ * always-on regulator; on the MRK3399 it is powered from the RK808's
+ * SWITCH_REG1 (vcc3v3_s3 in rk3399-mrk3399.dts, vcc_cam in the Rock Pi 4
+ * tree).
+ */
+&gmac {
+	assigned-clocks = <&cru SCLK_RMII_SRC>;
+	assigned-clock-parents = <&cru SCLK_MAC>;
+	phy-mode = "rmii";
+	phy-supply = <&vcc_cam>;
+	pinctrl-0 = <&rmii_pins>;
+	clock_in_out = "output";
+	/delete-property/ tx_delay;
+	/delete-property/ rx_delay;
+};
+
+/*
+ * The MRK3399 has no SD card slot (rk3399-mrk3399.dts leaves sdmmc disabled
+ * too). Enabled, U-Boot probes it on every boot scan and waits out a
+ * "Card did not respond to voltage select! : -110" timeout each time. The
+ * eMMC (sdhci) stays mmc 0; the SPL boot order skips the disabled node.
+ */
+&sdmmc {
+	status = "disabled";
+};

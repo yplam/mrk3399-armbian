@@ -1,0 +1,120 @@
+From: yplam <yplam@yplam.com>
+Subject: [PATCH] net: gmac_rockchip: add RMII support for RK3399
+
+The RK3399 GMAC ops only implement RGMII, so a board with phy-mode = "rmii"
+fails to probe with -EPERM. Add set_to_rmii and the RMII branch of
+fix_mac_speed, using the GRF_SOC_CON5 bits from Linux dwmac-rk.c
+(PHY_INTF_SEL = RMII plus RMII_MODE; RMII_CLK_SEL and MAC_SPEED for
+10/100). set_to_rgmii now also clears RMII_MODE, as Linux does.
+
+Needed by the MRK3399 (RTL8201F PHY on RMII).
+
+---
+diff --git a/arch/arm/include/asm/arch-rockchip/grf_rk3399.h b/arch/arm/include/asm/arch-rockchip/grf_rk3399.h
+--- a/arch/arm/include/asm/arch-rockchip/grf_rk3399.h
++++ b/arch/arm/include/asm/arch-rockchip/grf_rk3399.h
+@@ -637,6 +637,20 @@
+ 	RK3399_GMAC_PHY_INTF_SEL_RGMII = (1 << RK3399_GMAC_PHY_INTF_SEL_SHIFT),
+ 	RK3399_GMAC_PHY_INTF_SEL_RMII  = (4 << RK3399_GMAC_PHY_INTF_SEL_SHIFT),
+ 
++	RK3399_GMAC_SPEED_SHIFT = 7,
++	RK3399_GMAC_SPEED_MASK  = (1 << RK3399_GMAC_SPEED_SHIFT),
++	RK3399_GMAC_SPEED_10M   = (0 << RK3399_GMAC_SPEED_SHIFT),
++	RK3399_GMAC_SPEED_100M  = (1 << RK3399_GMAC_SPEED_SHIFT),
++
++	RK3399_RMII_MODE_SHIFT = 6,
++	RK3399_RMII_MODE_MASK  = (1 << RK3399_RMII_MODE_SHIFT),
++	RK3399_RMII_MODE       = (1 << RK3399_RMII_MODE_SHIFT),
++
++	RK3399_RMII_CLK_SEL_SHIFT = 3,
++	RK3399_RMII_CLK_SEL_MASK  = (1 << RK3399_RMII_CLK_SEL_SHIFT),
++	RK3399_RMII_CLK_SEL_2_5M  = (0 << RK3399_RMII_CLK_SEL_SHIFT),
++	RK3399_RMII_CLK_SEL_25M   = (1 << RK3399_RMII_CLK_SEL_SHIFT),
++
+ 	RK3399_GMAC_CLK_SEL_SHIFT = 4,
+ 	RK3399_GMAC_CLK_SEL_MASK  = (3 << RK3399_GMAC_CLK_SEL_SHIFT),
+ 	RK3399_GMAC_CLK_SEL_125M  = (0 << RK3399_GMAC_CLK_SEL_SHIFT),
+diff --git a/drivers/net/gmac_rockchip.c b/drivers/net/gmac_rockchip.c
+--- a/drivers/net/gmac_rockchip.c
++++ b/drivers/net/gmac_rockchip.c
+@@ -306,9 +306,37 @@
+ 
+ static int rk3399_gmac_fix_mac_speed(struct dw_eth_dev *priv)
+ {
++	struct dw_eth_pdata *dw_pdata = dev_get_plat(priv->dev);
++	struct eth_pdata *eth_pdata = &dw_pdata->eth_pdata;
+ 	struct rk3399_grf_regs *grf;
+ 	int clk;
+ 
++	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
++
++	if (eth_pdata->phy_interface == PHY_INTERFACE_MODE_RMII) {
++		switch (priv->phydev->speed) {
++		case 10:
++			rk_clrsetreg(&grf->soc_con5,
++				     RK3399_RMII_CLK_SEL_MASK |
++				     RK3399_GMAC_SPEED_MASK,
++				     RK3399_RMII_CLK_SEL_2_5M |
++				     RK3399_GMAC_SPEED_10M);
++			break;
++		case 100:
++			rk_clrsetreg(&grf->soc_con5,
++				     RK3399_RMII_CLK_SEL_MASK |
++				     RK3399_GMAC_SPEED_MASK,
++				     RK3399_RMII_CLK_SEL_25M |
++				     RK3399_GMAC_SPEED_100M);
++			break;
++		default:
++			debug("Unknown phy speed: %d\n", priv->phydev->speed);
++			return -EINVAL;
++		}
++
++		return 0;
++	}
++
+ 	switch (priv->phydev->speed) {
+ 	case 10:
+ 		clk = RK3399_GMAC_CLK_SEL_2_5M;
+@@ -324,7 +352,6 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
+ 	rk_clrsetreg(&grf->soc_con5, RK3399_GMAC_CLK_SEL_MASK, clk);
+ 
+ 	return 0;
+@@ -550,6 +577,17 @@
+ 		     pdata->tx_delay << RK3368_CLK_TX_DL_CFG_GMAC_SHIFT);
+ }
+ 
++static void rk3399_gmac_set_to_rmii(struct gmac_rockchip_plat *pdata)
++{
++	struct rk3399_grf_regs *grf;
++
++	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
++
++	rk_clrsetreg(&grf->soc_con5,
++		     RK3399_GMAC_PHY_INTF_SEL_MASK | RK3399_RMII_MODE_MASK,
++		     RK3399_GMAC_PHY_INTF_SEL_RMII | RK3399_RMII_MODE);
++}
++
+ static void rk3399_gmac_set_to_rgmii(struct gmac_rockchip_plat *pdata)
+ {
+ 	struct rk3399_grf_regs *grf;
+@@ -557,7 +595,7 @@
+ 	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
+ 
+ 	rk_clrsetreg(&grf->soc_con5,
+-		     RK3399_GMAC_PHY_INTF_SEL_MASK,
++		     RK3399_GMAC_PHY_INTF_SEL_MASK | RK3399_RMII_MODE_MASK,
+ 		     RK3399_GMAC_PHY_INTF_SEL_RGMII);
+ 
+ 	rk_clrsetreg(&grf->soc_con6,
+@@ -758,6 +796,7 @@
+ const struct rk_gmac_ops rk3399_gmac_ops = {
+ 	.fix_mac_speed = rk3399_gmac_fix_mac_speed,
+ 	.set_to_rgmii = rk3399_gmac_set_to_rgmii,
++	.set_to_rmii = rk3399_gmac_set_to_rmii,
+ };
+ 
+ const struct rk_gmac_ops rv1108_gmac_ops = {

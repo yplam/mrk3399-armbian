@@ -1,7 +1,8 @@
 # Flashing
 
-The image is a whole-disk image for the eMMC: GPT, `u-boot-rockchip.bin` at 32 KiB and the root filesystem from
-16 MiB. It's written over USB with `rkdeveloptool` while the RK3399 is in **maskrom** or **loader** mode.
+The image is a whole-disk image for the eMMC: GPT, `u-boot-rockchip.bin` at 32 KiB, then the boot, config and
+squashfs root partitions from 16 MiB (see [Image layout](k8s-lab.md#image-layout)). It's written over USB with
+`rkdeveloptool` while the RK3399 is in **maskrom** or **loader** mode.
 
 ## Tools
 
@@ -43,9 +44,10 @@ rkdeveloptool wl 0 build/output/images/Armbian-unofficial_*_Mrk3399_*_minimal.im
 rkdeveloptool rd                                # reset and boot
 ```
 
-`wl 0` writes from sector 0, so the partition table, bootloader and root filesystem are all replaced. On first
-boot Armbian grows the root partition to fill the eMMC. Until then the kernel reports
-`GPT: Alternate GPT header not at the end of the disk`, which is expected.
+`wl 0` writes from sector 0, so the partition table, bootloader, boot, config and root partitions are all
+replaced, and any data partition is lost. To prepare a node's settings first, edit the config partition in the
+image (see [node.conf](k8s-lab.md#nodeconf)). The image is smaller than the eMMC, so until the data partition is
+created at first boot the kernel reports `GPT: Alternate GPT header not at the end of the disk`, which is expected.
 
 The flashing port is the RK3399's OTG port, and this image keeps it a USB device once Linux is up: it comes
 back as a network link and a login console rather than going quiet. See [usb-gadget.md](usb-gadget.md).

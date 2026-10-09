@@ -17,6 +17,13 @@
 	compatible = "mrk,mrk3399", "rockchip,rk3399";
 
 	aliases {
+		/*
+		 * U-Boot's fdt_fixup_ethernet() finds the node through this
+		 * alias and writes the board's ethaddr (derived from the CPU
+		 * id) into local-mac-address. Without it stmmac picks a random
+		 * MAC on every boot.
+		 */
+		ethernet0 = &gmac;
 		mmc0 = &sdhci;
 	};
 

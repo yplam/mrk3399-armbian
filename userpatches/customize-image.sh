@@ -21,11 +21,16 @@ OVERLAY=/tmp/overlay
 : "${MRK3399_USER_PASSWORD:?not set, see the unattended first boot block in userpatches/config-mrk3399.conf}"
 : "${MRK3399_USER_REALNAME:?not set, see the unattended first boot block in userpatches/config-mrk3399.conf}"
 : "${MRK3399_TIMEZONE:?not set, see the unattended first boot block in userpatches/config-mrk3399.conf}"
+: "${MRK3399_K8S_VERSION:?not set, see the Kubernetes block in userpatches/config-mrk3399.conf}"
+: "${MRK3399_K8S_APT_URL:?not set, see the Kubernetes block in userpatches/config-mrk3399.conf}"
+: "${MRK3399_DOCKER_APT_URL:?not set, see the Kubernetes block in userpatches/config-mrk3399.conf}"
 
 Main() {
 	CreateUser
 	SetTimezone
 	InstallUsbGadget
+	InstallKubernetes
+	DisableSwap
 	SkipFirstLoginWizard
 } # Main
 
@@ -108,5 +113,92 @@ InstallUsbGadget() {
 
 	systemctl enable mrk3399-usb-gadget.service
 } # InstallUsbGadget
+
+# A kubeadm-ready node: containerd with the systemd cgroup driver, kubeadm,
+# kubelet and kubectl from pkgs.k8s.io, and the kernel modules and sysctls
+# kubeadm's preflight wants. No cluster is configured; kubelet restarts in a
+# loop until kubeadm init or join gives it a config, as on any kubeadm node.
+InstallKubernetes() {
+	local src="${OVERLAY}/k8s"
+	local k8s_repo="${MRK3399_K8S_APT_URL}/v${MRK3399_K8S_VERSION}/deb/"
+	local arch codename
+
+	arch=$(dpkg --print-architecture)
+	codename=$(. /etc/os-release && echo "${VERSION_CODENAME}")
+
+	echo "mrk3399: installing containerd and Kubernetes v${MRK3399_K8S_VERSION}"
+
+	# Both keys are ASCII-armoured; apt reads .asc keyrings directly, so
+	# gnupg doesn't have to be in the image.
+	install -d -m 0755 /etc/apt/keyrings
+	curl -fsSL "${MRK3399_K8S_APT_URL}/v${MRK3399_K8S_VERSION}/deb/Release.key" \
+		-o /etc/apt/keyrings/kubernetes.asc
+	curl -fsSL "${MRK3399_DOCKER_APT_URL}/gpg" -o /etc/apt/keyrings/docker.asc
+	echo "deb [signed-by=/etc/apt/keyrings/kubernetes.asc] ${k8s_repo} /" \
+		> /etc/apt/sources.list.d/kubernetes.list
+	echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] ${MRK3399_DOCKER_APT_URL} ${codename} stable" \
+		> /etc/apt/sources.list.d/docker.list
+
+	apt-get update
+	# conntrack, socat, ethtool: kubeadm preflight. ipset: kube-proxy in
+	# IPVS mode and most CNIs' network policy.
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+		containerd.io kubelet kubeadm kubectl kubernetes-cni cri-tools \
+		iptables conntrack socat ethtool ipset
+	apt-mark hold kubelet kubeadm kubectl
+
+	local installed
+	installed=$(dpkg-query -W -f='${Version}' kubeadm)
+	case "${installed}" in
+		"${MRK3399_K8S_VERSION}".*) ;;
+		*)
+			echo "mrk3399: kubeadm ${installed} is not from the v${MRK3399_K8S_VERSION} line" >&2
+			exit 1
+			;;
+	esac
+
+	# containerd.io ships a config.toml with the CRI plugin disabled (it's
+	# packaged for Docker). Replace it with the full default and switch runc
+	# to the systemd cgroup driver, which kubelet uses by default.
+	containerd config default > /etc/containerd/config.toml
+	if ! grep -q 'SystemdCgroup = false' /etc/containerd/config.toml; then
+		echo "mrk3399: no SystemdCgroup setting in containerd's default config, check its format" >&2
+		exit 1
+	fi
+	sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+
+	install -m 0644 -D "${src}/etc/modules-load.d/mrk3399-k8s.conf" /etc/modules-load.d/mrk3399-k8s.conf
+	install -m 0644 -D "${src}/etc/sysctl.d/90-mrk3399-k8s.conf" /etc/sysctl.d/90-mrk3399-k8s.conf
+	install -m 0644 -D "${src}/etc/crictl.yaml" /etc/crictl.yaml
+	install -m 0644 -D "${src}/etc/systemd/system/kubelet.service.d/10-mrk3399-time-sync.conf" \
+		/etc/systemd/system/kubelet.service.d/10-mrk3399-time-sync.conf
+
+	# Hold time-sync.target until timesyncd has a real time, so kubelet
+	# (ordered after it) doesn't start with a 1970 or stale clock.
+	systemctl enable systemd-time-wait-sync.service
+	systemctl enable containerd.service kubelet.service
+
+	echo "mrk3399: installed kubeadm ${installed}, containerd $(dpkg-query -W -f='${Version}' containerd.io)"
+} # InstallKubernetes
+
+# kubelet refuses to start while swap is on (failSwapOn defaults to true).
+# Armbian's only swap is the zram device armbian-zram-config sets up; keep the
+# service, which also provides the zram /var/log for armbian-ramlog, and turn
+# off just its swap.
+DisableSwap() {
+	local conf=/etc/default/armbian-zram-config
+
+	echo "mrk3399: disabling zram swap"
+	# The BSP postinst normally put it in place already. A file holding only
+	# SWAP=false would also turn the service off (ENABLED defaults to false).
+	if [ ! -f "${conf}" ] && [ -f "${conf}.dpkg-dist" ]; then
+		cp "${conf}.dpkg-dist" "${conf}"
+	fi
+	if [ -f "${conf}" ] && grep -Eq '^[[:blank:]]*#?[[:blank:]]*SWAP=' "${conf}"; then
+		sed -Ei 's/^[[:blank:]]*#?[[:blank:]]*SWAP=.*/SWAP=false/' "${conf}"
+	else
+		echo "SWAP=false" >> "${conf}"
+	fi
+} # DisableSwap
 
 Main "$@"

@@ -1,0 +1,4 @@
+# crictl talks to containerd's CRI socket without --runtime-endpoint.
+runtime-endpoint: unix:///run/containerd/containerd.sock
+image-endpoint: unix:///run/containerd/containerd.sock
+timeout: 10

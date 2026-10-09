@@ -1,0 +1,64 @@
+#!/bin/bash
+#
+# Reset this node: on the next boot the initramfs reformats the data
+# partition, which holds every change made to the OS since flashing and all
+# Kubernetes state (containerd images and containers, kubelet, etcd). The OS
+# image and the config partition (node.conf, machine-id, SSH host keys) are
+# kept, so the node comes back as a clean machine with the same name and
+# address, ready for kubeadm join. See docs/k8s-lab.md.
+
+set -euo pipefail
+
+FLAG=/run/mrk/config/mrk-reset
+
+usage() {
+	cat <<- USAGE
+		usage: mrk-reset [-y] [--no-reboot] | --cancel
+
+		  -y           don't ask for confirmation
+		  --no-reboot  only schedule the reset; it happens at the next boot
+		  --cancel     unschedule a reset that hasn't happened yet
+	USAGE
+}
+
+yes="" reboot=1
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-y | --yes) yes=1 ;;
+		--no-reboot) reboot="" ;;
+		--cancel)
+			rm -f "${FLAG}" && sync && echo "mrk-reset: cancelled"
+			exit 0
+			;;
+		-h | --help) usage; exit 0 ;;
+		*) usage >&2; exit 2 ;;
+	esac
+	shift
+done
+
+[ "$(id -u)" -eq 0 ] || { echo "mrk-reset: run as root" >&2; exit 1; }
+mountpoint -q /run/mrk/config || { echo "mrk-reset: the config partition isn't mounted (not a lab image?)" >&2; exit 1; }
+
+if [ -z "${yes}" ]; then
+	cat <<- WARN
+		This wipes, at the next boot:
+		  - every change made to the OS since it was flashed
+		  - all Kubernetes state on this node: containers, images, kubelet, etcd
+
+		and keeps: the OS image, node.conf, machine-id, SSH host keys.
+
+		If this node is in a cluster, remove it there first (kubectl drain /
+		kubectl delete node, and for a control-plane node its etcd member).
+	WARN
+	read -r -p "Reset $(hostname)? [y/N] " answer
+	[[ "${answer}" =~ ^[Yy]$ ]] || { echo "mrk-reset: nothing done"; exit 1; }
+fi
+
+echo "requested $(date -Is) by ${SUDO_USER:-root}" > "${FLAG}"
+sync
+if [ -n "${reboot}" ]; then
+	echo "mrk-reset: rebooting"
+	systemctl reboot
+else
+	echo "mrk-reset: the data partition will be wiped at the next boot (mrk-reset --cancel to undo)"
+fi

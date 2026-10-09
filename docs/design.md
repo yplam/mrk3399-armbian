@@ -15,8 +15,10 @@ Armbian looks in `userpatches/` for anything that isn't in its own tree, so noth
 | `userpatches/kernel/archive/rockchip64-6.18/dt/rk3399-mrk3399.dts`  | extra kernel device tree; the `rockchip64-6.18` patching config copies `dt/` into `arch/arm64/boot/dts/rockchip/` and adds it to the Makefile, no patch needed |
 | `userpatches/bootenv/mrk3399.txt`, `mrk3399-debug.txt`              | installed as `/boot/armbianEnv.txt` (selected by `BOOTENV_FILE`)                                     |
 | `userpatches/extensions/qemu-binfmt-register.sh`                    | build extension, enabled in `config-mrk3399.conf`                                                    |
+| `userpatches/extensions/mrk3399-lab-image.sh`                       | build extension: repacks the finished rootfs into the squashfs [lab layout](k8s-lab.md#image-layout) and writes the network upgrade files |
 | `userpatches/u-boot/v2026.07/dt_uboot/rk3399-rock-pi-4a-u-boot.dtsi` | replaces U-Boot's own file of that name; `dt_uboot/` is copied onto `arch/arm/dts/` and same-named userpatches files win |
-| `userpatches/customize-image.sh`, `userpatches/overlay/`            | runs in the chroot: sets up the default account, installs the USB gadget; the overlay is bind-mounted at `/tmp/overlay` |
+| `userpatches/u-boot/v2026.07/board_mrk3399/*.patch`                | U-Boot patches applied for this board only (RK3399 RMII support in `gmac_rockchip`, internal gmac clock, see [Ethernet in U-Boot](#ethernet-in-u-boot); the k8s lab's [upgrade commands](k8s-lab.md#network-upgrade)) |
+| `userpatches/customize-image.sh`, `userpatches/overlay/`            | runs in the chroot: sets up the default account, installs the USB gadget and the [Kubernetes node packages](k8s.md); the overlay is bind-mounted at `/tmp/overlay` |
 
 On every run Armbian also creates `config-example.conf`, `overlay/` and a set of empty patch directories in
 `userpatches/`. Git ignores `config-example.conf` and doesn't track empty directories. `customize-image.sh` is
@@ -58,7 +60,14 @@ The board file has two hooks:
   `MRK3399_DEBUG`, which `make build DEBUG=yes` passes as `MRK3399_DEBUG=yes`.
 - `post_config_uboot_target__mrk3399_uboot_config` adjusts the U-Boot `.config`: it enables `CONFIG_USB_STORAGE`
   (the USB ports are the only removable media) and `CONFIG_OF_LIBFDT_OVERLAY` (`boot.scr` applies overlays with
-  `fdt apply`), and disables `CONFIG_NVME_PCI` and `CONFIG_CMD_NVME`.
+  `fdt apply`) and `CONFIG_CMD_KASLRSEED` (`boot.scr` runs `kaslrseed`, which seeds the kernel's address-layout
+  randomization from the SoC's hardware RNG), and disables `CONFIG_NVME_PCI` and `CONFIG_CMD_NVME`. For the
+  k8s lab's upgrade commands (`run mrk_upgrade`, `run mrk_upgrade_uboot` at the U-Boot prompt) it selects the
+  built-in environment from
+  `board_mrk3399/0003-board-rockpi4-add-the-MRK3399-lab-upgrade-environment.patch` (`CONFIG_ENV_SOURCE_FILE`),
+  switches to `CONFIG_ENV_IS_NOWHERE`, and enables `CONFIG_CMD_SETEXPR`, `CONFIG_CMD_HASH` and
+  `CONFIG_HASH_VERIFY`. `bootcmd` stays the default bootflow scan, so a normal boot never touches the network;
+  see [Network upgrade](k8s-lab.md#network-upgrade).
 
 ## Boot chain and image layout
 
@@ -72,7 +81,7 @@ BootROM → TPL (mainline, LPDDR4 init) → SPL → ATF BL31 (mainline) → U-Bo
 | ------------------ | ------------------------------------------------------------------ |
 | 0                  | GPT                                                                |
 | 32 KiB (sector 64) | `u-boot-rockchip.bin` (TPL + SPL + ATF + U-Boot)                   |
-| 16 MiB             | partition 1: ext4 root filesystem, `/boot` included                |
+| 16 MiB             | partitions: boot (ext4), config (vfat), root (squashfs); data created on the node. See [Image layout](k8s-lab.md#image-layout) |
 
 ## Boot environment
 
@@ -101,6 +110,8 @@ correctness:
 - `gmac` in RMII mode uses `rmii_pins` (the same pins as `rgmii_pins` plus RX_ER), and the `tx_delay` /
   `rx_delay` properties, which do nothing for RMII, are gone. stmmac still honours the legacy `snps,reset-gpio`.
 - The duplicated `&u2phy0_host` / `&u2phy1_host` nodes are merged.
+- Added the `ethernet0 = &gmac` alias, so U-Boot can hand Linux the board's stable MAC address
+  (see [Ethernet in U-Boot](#ethernet-in-u-boot)).
 - `usbdrd_dwc3_0` is `dr_mode = "peripheral"` rather than the Rock Pi 4's `"host"`, so the OTG port runs as a
   USB device. See [USB and the OTG port](#usb-and-the-otg-port).
 - `sdmmc`, `sdio0`, `pcie0`, `pcie_phy`, `hdmi` and `tcphy1` stay disabled because the hardware isn't there.
@@ -147,6 +158,41 @@ GPIO1_A3 has no equivalent here, and `vcc5v0_host` only feeds `u2phy0_host` / `u
 that is correct: the PC supplies VBUS, and the PHY uses it for `otg-bvalid` connect detection.
 
 The gadget that runs on top of this is in [usb-gadget.md](usb-gadget.md).
+
+## SD controller in U-Boot
+
+The Rock Pi 4 has an SD slot, the MRK3399 doesn't. `rk3399-rock-pi-4a-u-boot.dtsi` disables `sdmmc`, as
+`rk3399-mrk3399.dts` already does for Linux. Left enabled, every boot scan probes it and waits out a `Card did not
+respond to voltage select! : -110` timeout. The eMMC stays `mmc 0`.
+
+## Ethernet in U-Boot
+
+U-Boot uses the Rock Pi 4 device tree, whose `gmac` is RGMII for a gigabit PHY. The MRK3399 has an RTL8201F on
+RMII, so `rk3399-rock-pi-4a-u-boot.dtsi` overrides the node: `phy-mode = "rmii"`, `rmii_pins`, no RGMII delays,
+and two board differences that the kernel DT doesn't spell out the same way:
+
+- **Reference clock.** The RTL8201F has no crystal; it runs from the 50 MHz the SoC sends out on `mac_clk`
+  (`clock_in_out = "output"`), generated internally by `clk_gmac`. Without it the PHY doesn't answer on MDIO and
+  U-Boot reports `Could not get PHY for ethernet@fe300000`. Linux gets there by itself: although
+  `rk3399-mrk3399.dts` names `clkin_gmac` as the parent, `clk_summary` shows `clk_rmii_src` under `clk_gmac` at
+  50 MHz. U-Boot's override sets `assigned-clock-parents = <&cru SCLK_MAC>` explicitly.
+- **PHY supply.** The Rock Pi 4 has an always-on `vcc3v3_lan`; the MRK3399 powers the PHY from the RK808's
+  `SWITCH_REG1` (`vcc3v3_s3` in Linux, `vcc_cam` in the Rock Pi 4 tree), so `phy-supply = <&vcc_cam>`.
+
+U-Boot v2026.07 needs two patches in `board_mrk3399/` for this:
+
+- `0001-net-gmac_rockchip-add-RMII-support-for-RK3399.patch`: the RK3399 GMAC ops only implemented RGMII and
+  failed the probe with `-EPERM` for anything else. It adds `set_to_rmii` and the RMII speed setting, with the
+  `GRF_SOC_CON5` bits from Linux's `dwmac-rk.c`.
+- `0002-clk-rk3399-generate-the-gmac-clock-internally.patch`: the RK3399 clock driver only accepted an external
+  MAC clock ("internal clock is UNIMPLEMENTED"). It now runs NPLL, unused elsewhere in U-Boot, at 1 GHz and
+  divides `clk_gmac` from it (GPLL at 594 MHz and CPLL at 384 MHz can't give 50 MHz exactly). It also fixes the
+  `HCLK_HOST*` gates, which wrote `CLKSEL_CON20`, the register that holds the `clk_gmac` divider, instead of
+  `CLKGATE_CON20`; `usb start` would otherwise have changed the Ethernet clock.
+
+The MAC address comes from the CPU id (`CONFIG_MISC_INIT_R` with the eFuse driver), so each board has a stable,
+unique `ethaddr`. U-Boot writes it into the kernel device tree as `local-mac-address`, which needs the
+`ethernet0 = &gmac` alias in `rk3399-mrk3399.dts`; without the alias, stmmac picks a random MAC on every boot.
 
 ## Unattended first boot
 
